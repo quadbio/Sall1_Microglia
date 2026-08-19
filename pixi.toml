@@ -1,0 +1,82 @@
+[workspace]
+name = "analysis-template"
+version = "0.1.0"
+description = "Template for single-cell/spatial analysis projects (pixi-managed)"
+authors = ["Your Name <your.email@example.com>"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[tasks]
+lab = "jupyter lab"
+test = "pytest"
+rename = { cmd = "python scripts/rename_package.py", description = "Rename the placeholder package/project (run once on a fresh clone; see scripts/rename_package.py)" }
+install-kernel = "python -m ipykernel install --user --name=analysis-template --display-name='Analysis Template (Pixi)'"
+install-hooks = { cmd = "pre-commit install --install-hooks && nbstripout --install && git config diff.ipynb.textconv 'nbstripout -t'", description = "Install pre-commit hooks + the nbstripout notebook-output filter (run once per clone)" }
+
+[dependencies]
+python = "3.12.*"
+# Pin numpy to avoid conda/pypi conflicts with numba
+numpy = ">=2.0,<2.2"
+
+# CellRank accelerated linear algebra (PETSc/SLEPc)
+# Pre-built from conda-forge; PyPI wheels require building from source
+petsc4py = "*"
+slepc4py = "*"
+
+# Shapely from conda to avoid pygeos build issues
+shapely = "*"
+
+[pypi-dependencies]
+# Compatibility fix: cuML (rapids dependency) incompatible with sklearn 1.8
+# https://github.com/rapidsai/cuml/issues/6426
+scikit-learn = "<1.8"
+
+# CPU JAX on all platforms by default (MPS handled automatically by torch on
+# macOS). The `gpu` environment overrides this with the CUDA build on Linux.
+jax = "<0.9.0"
+
+# Core single-cell stack
+scanpy = ">=1.10"
+squidpy = "*"
+scvi-tools = "*"
+cellrank = "*"
+torch = "*"
+
+# Notebook workflow
+jupyterlab = "*"
+ipykernel = "*"
+ipywidgets = "*"
+# Pin pandas < 3.0 until anndata supports Arrow-backed strings
+# https://github.com/scverse/anndata/issues/1434
+pandas = ">=2.0, <3"
+matplotlib = "*"
+seaborn = "*"
+
+# Utilities
+pre-commit = "*"
+nbstripout = "*"
+pytest = "*"
+session-info2 = "*"
+
+# Local editable package for path helpers
+myanalysis = { path = ".", editable = true }
+igraph = ">=1.0.0, <2"
+celltypist = ">=1.7.1, <2"
+
+# GPU stack — only materialized in the `gpu` environment (Linux + CUDA 12).
+# The default environment is CPU-only and is what CI installs; macOS local also
+# uses the default. Activate `gpu` explicitly on a Linux/CUDA box (e.g. Euler):
+#
+#     pixi install -e gpu
+#     pixi run -e gpu install-kernel
+[feature.gpu.pypi-options]
+extra-index-urls = ["https://pypi.nvidia.com"]
+
+[feature.gpu.target.linux-64.pypi-dependencies]
+# `rapids-cu12` extra pulls cuml/cupy/cudf from pypi.nvidia.com; without it
+# rapids-singlecell installs without the GPU libs and silently runs on CPU.
+rapids-singlecell = { version = ">=0.15, <0.16", extras = ["rapids-cu12"] }
+jax = { version = "<0.9.0", extras = ["cuda12"] }
+
+[environments]
+gpu = ["gpu"]
