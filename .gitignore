@@ -1,7 +1,7 @@
 # Track only scripts for now
 *
 
-# Keep git metadata files
+# Keep git metadata file tracked
 !.gitignore
 
 # Include Scripts directory and all its contents
