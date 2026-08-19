@@ -1,0 +1,302 @@
+---
+title: "DE analysis of optimised conditions"
+author: "Marina Nikolova"
+date: "14/11/2022"
+output: html_document
+---
+]
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_cond_levels <- factor(c("A","B", "C", "D","E", "F", "G","H", "I", "J"))
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#002C3D","#03707E", "#65c1be", "#5F6C25", "#BBA834", "#E7A624", "#CA6702", "#C33708", "#971E1C", "#A74E8D")), mg_cond_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_primary_ct_levels <- factor(c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia", "SOX-hi microglia", "Monocyte", "Perivascular macrophage", "Erythrocyte"))
+# generate color palette based on vintage_cols palette
+col_primary_ct <-setNames(c(rev(rainbow_pastel_cols(9))), mg_primary_ct_levels)
+
+```
+
+```{r load seurat object}
+
+# load microglia conditions
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Protocol_optimization/seurat_integrated.rds")
+
+# Kracht et al 2020 microglia
+seurat_MG <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/Kracht_primary_microglia_seurat.rds")
+# subset only clear microglia cells from the kracht dataset - exclude erythrocyte, monocyte, perivascular macrophage and sox-hi microglia
+seurat_MG_only <- subset(seurat_MG, subset = celltype %in% c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000) 
+seurat_MG_only$condition <- "primary"
+
+```
+Integrate the primary and in vitro data
+```{r integration}
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = c(seurat, seurat_MG_only), fvf.nfeatures = 3000)
+
+# integrate
+anchors <- FindIntegrationAnchors(object.list = c(seurat, seurat_MG_only), anchor.features = features)
+
+# this command creates an 'integrated' data assay
+integrated <- IntegrateData(anchorset = anchors)
+
+```
+
+Integrated analysis
+```{r integrated analysis}
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(integrated) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+integrated <- ScaleData(integrated, verbose = FALSE) %>%
+        RunPCA(npcs = 30, verbose = FALSE) %>%
+        RunUMAP(reduction = "pca", dims = 1:30) %>%
+        FindNeighbors(reduction = "pca", dims = 1:30) %>%
+        FindClusters(resolution = 0.5) %>%
+        FindClusters(resolution = 0.3)
+
+# Visualization
+p1 <- DimPlot(integrated, reduction = "umap", group.by = "condition", cols = rev(rainbow_pastel_cols(11)))
+p2 <- DimPlot(integrated, reduction = "umap", label = TRUE, repel = TRUE)
+p1 + p2
+
+DimPlot(integrated, reduction = "umap", group.by = "condition", cols = rev(rainbow_pastel_cols(11)), split.by = "condition")
+
+```
+
+#### DE analysis
+Find DE genes
+```{r}
+
+# For performing differential expression after integration, we switch back to the original
+# data
+DefaultAssay(integrated) <- "RNA"
+Idents(integrated) <- "condition"
+# Find differentially expressed features between each condition and the priamry cells
+# A vs primary
+markers.A <- wilcoxauc(integrated, group_by = "condition", groups_use = c("A", "primary")) %>%
+  filter(group == "A") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.A <- markers.A %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.A, "Plots/Protocol_optimization/wicoaux_DEGs_A_vs_primary.csv")
+
+# B vs primary
+markers.B <- wilcoxauc(integrated, group_by = "condition", groups_use = c("B", "primary")) %>%
+  filter(group == "B") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.B <- markers.B %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.B, "Plots/Protocol_optimization/wicoaux_DEGs_B_vs_primary.csv")
+
+
+# C vs primary
+markers.C <- wilcoxauc(integrated, group_by = "condition", groups_use = c("C", "primary")) %>%
+  filter(group == "C") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.C <- markers.C %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.C, "Plots/Protocol_optimization/wicoaux_DEGs_C_vs_primary.csv")
+
+
+# D vs primary
+markers.D <- wilcoxauc(integrated, group_by = "condition", groups_use = c("D", "primary")) %>%
+  filter(group == "D") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.D <- markers.D %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.D, "Plots/Protocol_optimization/wicoaux_DEGs_D_vs_primary.csv")
+
+# E vs primary
+markers.E <- wilcoxauc(integrated, group_by = "condition", groups_use = c("E", "primary")) %>%
+  filter(group == "E") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.E <- markers.E %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.E, "Plots/Protocol_optimization/wicoaux_DEGs_E_vs_primary.csv")
+
+# F vs primary
+markers.F <- wilcoxauc(integrated, group_by = "condition", groups_use = c("F", "primary")) %>%
+  filter(group == "F") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.F <- markers.F %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.F, "Plots/Protocol_optimization/wicoaux_DEGs_F_vs_primary.csv")
+
+# G vs primary
+markers.G <- wilcoxauc(integrated, group_by = "condition", groups_use = c("G", "primary")) %>%
+  filter(group == "G") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.G <- markers.G %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.G, "Plots/Protocol_optimization/wicoaux_DEGs_G_vs_primary.csv")
+
+# H vs primary
+markers.H <- wilcoxauc(integrated, group_by = "condition", groups_use = c("H", "primary")) %>%
+  filter(group == "H") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.H <- markers.H %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.H, "Plots/Protocol_optimization/wicoaux_DEGs_H_vs_primary.csv")
+
+# I vs primary
+markers.I <- wilcoxauc(integrated, group_by = "condition", groups_use = c("I", "primary")) %>%
+  filter(group == "I") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.I <- markers.I %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.I, "Plots/Protocol_optimization/wicoaux_DEGs_I_vs_primary.csv")
+
+# J vs primary
+markers.J <- wilcoxauc(integrated, group_by = "condition", groups_use = c("J", "primary")) %>%
+  filter(group == "J") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+markers.J <- markers.J %>% 
+  mutate(outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged"))
+write.csv(markers.J, "Plots/Protocol_optimization/wicoaux_DEGs_J_vs_primary.csv")
+
+
+# plot
+# A vs primary
+pdf("Plots/Protocol_optimization/volcano_DE_A_vs_primary.pdf", height = 5, width = 8)
+ggplot(markers.A, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) + 
+  ggtitle("DEGs condition A vs. primary microglia")
+dev.off()
+
+# B vs primary
+pdf("Plots/Protocol_optimization/volcano_DE_B_vs_primary.pdf", height = 5, width = 8)
+ggplot(markers.B, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) + 
+  ggtitle("DEGs condition B vs. primary microglia")
+dev.off()
+
+# J vs primary
+pdf("Plots/Protocol_optimization/volcano_DE_J_vs_primary.pdf", height = 5, width = 8)
+ggplot(markers.J, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) + 
+  ggtitle("DEGs condition J vs. primary microglia")
+dev.off()
+
+
+ggplot(markers.A, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) + 
+  ggtitle("DEGs condition A vs. primary microglia")
+
+ggplot(markers.B, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) + 
+  ggtitle("DEGs condition B vs. primary microglia")
+
+ggplot(markers.J, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) + 
+  ggtitle("DEGs condition J vs. primary microglia")
+
+```
+

@@ -1,0 +1,477 @@
+---
+title: "Organoid co-culture with microglia time course analysis"
+author: "Marina Nikolova"
+date: "26/10/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+
+# reorder the samples in the metadata to appear in the order desired by us
+org_cocult_levels <- factor(c("ORG-d3-ctrl","ORG-d15-ctrl","ORG-d30-ctrl","ORG-d58-ctrl", "ORG-d3-cocul","ORG-d15-cocul", "ORG-d30-cocul","ORG-d58-cocul"))
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#94D2BD","#58B6AC", "#026D7D", "#002C3D", "#D9BE6D", "#E69000", "#C73E04", "#861D21")), org_cocult_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+my_levels <- factor(c("Proliferating neuron progenitor","Hindbrain neuron progenitor 1", "Hindbrain neuron progenitor 2", "Hindbrain neuron", "Forebrain neuron", "Forebrain neuron progenitor", "Immature choroid plexus 1",  "Immature choroid plexus 2", "Choroid plexus", "Choroid plexus stroma",  "Retina"))
+# generate color palette based on vintage_cols palette
+col_ct <-setNames(c("#9A5C6B", "#6B6D84", "#54768D", "#3F8C70", "#65935B", "#ACA64D", "#E7AF40", "#E0922C", "#DB7A2F", "#DA6138", "#DD4345"), my_levels)
+
+```
+
+#### Load data
+```{r load Seurat object}
+
+# load integrated all time points orgnaoid data
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/organoid_d3_d15_d30_d58_integrated.rds")
+
+```
+
+```{r rename metadata}
+
+# Adjust properly the matadata for the condition ("COCUL" vs "CTRL"), timepoint ("D..."), line (WTC or B7)
+library(stringi)
+
+# Timepoint
+timepoint <- seurat@meta.data$sample
+timepoint <- stri_replace_all_regex(timepoint,
+                                  pattern=c("ORG-d3-ctrl", "ORG-d3-cocul", "ORG-d15-ctrl", "ORG-d15-cocul", "ORG-d30-ctrl", "ORG-d30-cocul", "ORG-d58-ctrl", "ORG-d58-cocul"),
+                                  replacement=c("D3", "D3", "D15", "D15","D30", "D30", "D58","D58"),
+                                  vectorize=FALSE)
+
+seurat[["timepoint"]] <- timepoint
+
+
+# Condition
+condition <- seurat@meta.data$sample
+condition <- stri_replace_all_regex(condition,
+                                  pattern=c("ORG-d3-ctrl", "ORG-d3-cocul", "ORG-d15-ctrl", "ORG-d15-cocul", "ORG-d30-ctrl", "ORG-d30-cocul", "ORG-d58-ctrl", "ORG-d58-cocul"),
+                                  replacement=c("CTRL", "COCUL", "CTRL", "COCUL", "CTRL", "COCUL", "CTRL", "COCUL"),
+                                  vectorize=FALSE)
+
+seurat[["condition"]] <- condition
+
+
+# Cell line 
+line <- seurat@meta.data$sample
+line <- stri_replace_all_regex(line,
+                                  pattern=c("ORG-d3-ctrl", "ORG-d3-cocul", "ORG-d15-ctrl", "ORG-d15-cocul", "ORG-d30-ctrl", "ORG-d30-cocul", "ORG-d58-ctrl", "ORG-d58-cocul"),
+                                  replacement=c("B7", "B7", "B7", "B7", "B7", "B7", "WTC", "WTC"),
+                                  vectorize=FALSE)
+
+seurat[["line"]] <- line
+
+```
+
+```{r find cluster markers}
+
+Idents(seurat) <- "RNA_snn_res.0.2"
+
+table(seurat$sample, seurat$RNA_snn_res.0.2)
+
+cl_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/Co-culture_timecourse/Organoid_data/top_cl_markers.csv")
+write.csv(top50_cl_markers, "Plots/Co-culture_timecourse/Organoid_data/top50_cl_markers.csv")
+
+```
+
+
+#### Name clusters
+```{r name clusters}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "RNA_snn_res.0.2"
+
+seurat$celltype <- factor(setNames(c("Hindbrain neuron", # 0 Hindbrain neuron
+                                     "Choroid plexus", # 1 Choroid plexus - TTR, TPBG, TRH, WLS, RSPO2, RSPO3; not top genes but also CLIC6 and HTR2C (https://www.science.org/doi/10.1126/science.aaz5626)
+                                     "Hindbrain neuron progenitor 1", # 2 Neural progenitor cells (hindbrain)- FGFBP3, PLP1, EDNRB, TTYH1, GPM6B, VIM, PTN, C1orf61, NES, QKI, HES5...HES4, SOX2, PAX3, SOX3 
+                                     "Proliferating neuron progenitor", # 3 Proliferating neuronal cells (hindbrain) - HIST1H4C, HMGB2, etc. but also HES5, NES, ..
+                                     "Immature choroid plexus 1", # 4 Immature choroid plexus (neuroprotective; AIF-high) - (CRYAB: https://www.pnas.org/doi/10.1073/pnas.1621314114; GDF15: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4479809/ ; CIB1: https://faseb.onlinelibrary.wiley.com/doi/full/10.1096/fj.201902966RR; P4HA1 :https://pubs.acs.org/doi/pdf/10.1021/acs.jproteome.0c00934) see also  (Lancaster: https://www.science.org/doi/10.1126/science.aaz5626 and http://cells.ucsc.edu/?ds=chporg)
+                                     "Immature choroid plexus 2", # 5 Immature choroid plexus (vesicular transport; AIF-mid) - VAMP2, ARF4, ENO2, MAP1LC3B, PGK1, RNMT, SUCO, RAB3A (Lancaster: https://www.science.org/doi/10.1126/science.aaz5626 and http://cells.ucsc.edu/?ds=chporg ; an article where they mention that choroid plexus and pia are IBA1 (AIF1) positive https://elifesciences.org/articles/80352)
+                                     "Choroid plexus stroma", # 6 Choroid plexus stroma - COL3A1, COL1A2, COL1A1, LGALS1, DCN, TIMP1, LUM (https://www.science.org/doi/10.1126/science.aaz5626)
+                                     "Forebrain neuron", # 7 Dorsal telencephalic (forebrain) - NEUROD2, NEUROD6, FOXG1, NFIB, BCL11A, SLA (list curated bu Hsiu-Chuan Lin: https://docs.google.com/spreadsheets/d/1ojHAx_vW0p_IJla8hArlIFT7Pc0psUAs3z1CKnTIyk4/edit#gid=420174809)
+                                     "Forebrain neuron progenitor", # 8 Dorsal telencephalon progenitors (forebrain)  - C1orf61, SFRP1, FABP7, LHX2, PTPRZ1, EMX2, ... HEY1, SOX2 (list curated bu Hsiu-Chuan Lin: https://docs.google.com/spreadsheets/d/1ojHAx_vW0p_IJla8hArlIFT7Pc0psUAs3z1CKnTIyk4/edit#gid=420174809)
+                                     "Hindbrain neuron progenitor 2", # 9 Hindbrain neuron progenitor 
+                                     "Retina", # 11 Retina - RORB, RBP1, NEUROD1, NEUROD6, CHRNA3, RAX, DCT, ... PAX6, SIX3, OTX2 (protein atlas and the curated list by Hsiu-Chuan mentioned above)
+                                     "Choroid plexus stroma" # 11 Choroid plexus stroma - MGP, COL1A2, COL1A1, COL3A1, LGALS1, TIMP1, etc.
+                                     ), levels(seurat@active.ident))[seurat@active.ident])
+
+# reorder the samples in the metadata to appear in the order desired by us
+my_levels <- factor(c("Proliferating neuron progenitor","Hindbrain neuron progenitor 1", "Hindbrain neuron progenitor 2", "Hindbrain neuron", "Forebrain neuron", "Forebrain neuron progenitor", "Immature choroid plexus 1",  "Immature choroid plexus 2", "Choroid plexus", "Choroid plexus stroma", "Retina"))
+
+# generate color palette based on vintage_cols palette
+col_ct <-setNames(c("#9A5C6B", "#75697E", "#54768D", "#45837E", "#428D6E", "#8C9D51", "#CDAF49", "#E5AB3D", "#E0942E", "#DA7032", "#DD4345"), my_levels)
+
+Idents(seurat) <- "celltype"
+seurat$celltype <- factor(seurat$celltype, levels = my_levels)
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/umap_by_celltype.pdf", width = 6, height = 4)
+DimPlot(seurat, reduction = "umap_css", group.by = "celltype",pt.size = 0.5, label=F, cols=col_ct) & NoAxes()
+dev.off()
+    
+png("Plots/Co-culture_timecourse/Organoid_data/umap_by_celltype.png", width = 2800, height = 1900, res = 400)
+DimPlot(seurat, group.by="celltype", reduction="umap_css", cols = col_ct, pt.size = 0.4) & NoAxes()
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/umap_by_line.pdf", width = 6, height = 4)
+DimPlot(seurat, reduction = "umap_css", group.by = "line",pt.size = 0.5, label=F, cols = c("#bdbdbd",  "#252525")) & NoAxes()
+dev.off()
+    
+png("Plots/Co-culture_timecourse/Organoid_data/umap_by_line.png", width = 2800, height = 1900, res = 400)
+DimPlot(seurat, group.by="line", reduction="umap_css", cols = c("#bdbdbd",  "#252525"), pt.size = 0.4) & NoAxes()
+dev.off()
+
+DimPlot(seurat, reduction = "umap_css", group.by = "celltype",pt.size = 0.5, label=F, cols = col_ct) & NoAxes()
+DimPlot(seurat, reduction = "umap_css", group.by = "RNA_snn_res.0.2",pt.size = 0.5, label=F) & NoAxes()
+
+```
+
+```{r find celltype markers}
+
+Idents(seurat) <- "celltype"
+
+table(seurat$sample, seurat$celltype)
+
+cl_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/Co-culture_timecourse/Organoid_data/top_cl_markers_by-celltype.csv")
+write.csv(top50_cl_markers, "Plots/Co-culture_timecourse/Organoid_data/top50_cl_markers_by_celltype.csv")
+
+```
+
+# Plot basic infromation
+
+#### Plot UMAPs colored by various measures.
+
+```{r plot integrated object}
+
+Idents(seurat) <- "sample"
+
+# plot all cells from all samples
+pdf("Plots/Co-culture_timecourse/Organoid_data/umap_by_sample.pdf", width = 6, height = 4)
+DimPlot(seurat, group.by="sample", reduction="umap_css", cols = col_sample, pt.size = 0.4) & NoAxes()
+dev.off()
+
+png("Plots/Co-culture_timecourse/Organoid_data/umap_by_sample.png", width = 2600, height = 1900, res = 400)
+DimPlot(seurat, group.by="sample", reduction="umap_css", cols = col_sample, pt.size = 0.4) & NoAxes()
+dev.off()
+
+
+DimPlot(seurat, group.by="sample", reduction="umap_css", cols = col_sample) & NoAxes()
+
+# susbet cells from each sample
+mg_d3_ctrl <- WhichCells(seurat, idents = c("ORG-d3-ctrl"))
+mg_d15_ctrl <- WhichCells(seurat, idents = c("ORG-d15-ctrl"))
+mg_d30_ctrl <- WhichCells(seurat, idents = c("ORG-d30-ctrl"))
+mg_d58_ctrl <- WhichCells(seurat, idents = c("ORG-d58-ctrl"))
+mg_d3_cocul <- WhichCells(seurat, idents = c("ORG-d3-cocul"))
+mg_d15_cocul <- WhichCells(seurat, idents = c("ORG-d15-cocul"))
+mg_d30_cocul <- WhichCells(seurat, idents = c("ORG-d30-cocul"))
+mg_d58_cocul <- WhichCells(seurat, idents = c("ORG-d58-cocul"))
+
+# plot each sample separately
+png("Plots/Co-culture_timecourse/Organoid_data/umap_by_sample_sep.png", width = 4000, height = 2000, res = 300)
+(DimPlot(seurat, cells.highlight = mg_d3_ctrl,  reduction="umap_css", cols.highlight = c("#94D2BD"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d15_ctrl,  reduction="umap_css", cols.highlight = c("#58B6AC"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d30_ctrl,  reduction="umap_css", cols.highlight = c("#026D7D"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d58_ctrl,  reduction="umap_css", cols.highlight = c("#002C3D"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend()) / 
+(DimPlot(seurat, cells.highlight = mg_d3_cocul,  reduction="umap_css", cols.highlight = c("#D9BE6D"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d15_cocul,  reduction="umap_css", cols.highlight = c("#E69000"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d30_cocul,  reduction="umap_css", cols.highlight = c("#C73E04"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d58_cocul,  reduction="umap_css", cols.highlight = c("#861D21"), cols = "lightgray", order = T, pt.size = 0.6) & NoAxes() & NoLegend())
+dev.off()
+
+# plot by cluster
+png("Plots/Co-culture_timecourse/Organoid_data/umap_by_cluster_res.0.2.png", width = 2400, height = 1900, res = 400)
+DimPlot(seurat, reduction="umap_css",  group.by="RNA_snn_res.0.2", cols = rev(rainbow_pastel_cols(13)), pt.size = 0.5) & NoAxes()
+dev.off()
+
+```
+#### Plot cell number per sample
+```{r cell number}
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$sample))
+cells_cl$Var1 <- factor(x = cells_cl$Var1, levels = org_cocult_levels)
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Sample"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/Organoid_data/no_cells_per_sample.pdf",  width = 12, height = 6)
+ggplot(cells_cl, aes(fill=Sample, y=Freq, x=Sample)) +
+    geom_bar( stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cell type") +
+    ylab("Organoid cell number") +
+    scale_fill_manual(values = col_sample) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+#### Plot cluster markers.
+```{r heatmap top markers by cluster, fig.height=7, fig.width=4}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "celltype"
+
+avgexp <- AverageExpression(seurat, return.seurat = T)
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/heatmap_top10_markers_celltype.pdf", width = 8, height = 20)
+DoHeatmap(avgexp, features = top10_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = col_ct) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/heatmap_top50_markers_celltype.pdf", width = 8, height = 60)
+DoHeatmap(avgexp, features = top50_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = col_ct) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+library(gplots)
+avg_cond_cl <- sapply(levels(seurat$celltype), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$celltype==x)]))
+# scale the data as 0 to 1 (instead)
+
+# top 2 markers
+col.order <- top2_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top2_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Co-culture_timecourse/Organoid_data/heatmap_scaled_top2_markers_celltype.pdf", width = 9, height = 11)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col = colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# top 10 markers
+col.order <- top10_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top10_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Co-culture_timecourse/Organoid_data/heatmap_scaled_top10_markers_celltype.pdf", width = 9, height = 24)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# top 50 markers
+col.order <- top50_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top50_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Co-culture_timecourse/Organoid_data/heatmap_scaled_top50_markers_celltype.pdf", width = 9, height = 30)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=0.5, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+```{r stacked violing plot function}
+
+library(Seurat)
+library(ggplot2)
+
+## remove the x-axis text and tick 
+## plot.margin to adjust the white space between each plot.
+## ... pass any arguments to VlnPlot in Seurat
+modify_vlnplot<- function(obj, 
+feature, 
+pt.size = 0,
+plot.margin = margin(0, 0, 0, 0, "cm"),
+...) {
+p<- VlnPlot(obj, features = feature, pt.size = pt.size, ... )+
+ylab(feature) + 
+theme(legend.position = "none",
+plot.title= element_blank(),
+axis.title.x = element_blank(),
+axis.text.x = element_blank(), 
+axis.ticks.x = element_blank(), 
+axis.title.y = element_text(size = rel(1), angle = 0), 
+axis.text.y = element_text(size = rel(1)), 
+plot.margin = plot.margin ) 
+return(p)
+}
+
+
+## extract the max value of the y axis
+extract_max<- function(p){
+  ymax<- max(ggplot_build(p)$layout$panel_scales_y[[1]]$range$range)
+  return(ceiling(ymax))
+}
+
+
+## main function
+StackedVlnPlot<- function(obj, features,
+                          pt.size = 0, 
+                          plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
+                          ...) {
+  
+  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
+  
+  # Add back x-axis title to bottom plot. patchwork is going to support this?
+  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
+    theme(axis.text.x=element_text(angle = 45, hjust = 1, vjust = 1), 
+          axis.ticks.x = element_line())
+  
+  # change the y-axis tick to only max value 
+  ymaxs<- purrr::map_dbl(plot_list, extract_max)
+  plot_list<- purrr::map2(plot_list, ymaxs, function(x,y) x + 
+                            scale_y_continuous(breaks = c(y)) + 
+                            expand_limits(y = y))
+  
+  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1)
+  return(p)
+}
+
+```
+
+```{r stacked vln plot marger genes microglia in vitro}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "celltype"
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/vlnpt_top2_markers_ct.pdf", width = 10.5, height = 10)
+StackedVlnPlot(obj = seurat, features = top2_cl_markers$gene, cols = col_ct) 
+dev.off()
+
+png("Plots/Co-culture_timecourse/Organoid_data/vlnpt_top2_markers_ct.png",  width = 3200, height = 2400, res = 400)
+StackedVlnPlot(obj = seurat, features = top2_cl_markers$gene, cols = col_ct) 
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/dotpt_top2_markers_ct.pdf", width = 10.5, height = 8)
+DotPlot(seurat, features = unique(top2_cl_markers$gene), group.by = "celltype") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+png("Plots/Co-culture_timecourse/Organoid_data/dotpt_top2_markers_ct.png", width = 3200, height = 1800, res = 400)
+DotPlot(seurat, features = unique(top2_cl_markers$gene), group.by = "celltype") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+
+```
+
+#### Cell type markers
+Generate plots with markers of various clusters
+```{r feature plots}
+
+DefaultAssay(seurat) <- "RNA"
+
+genes <- c("NES","SOX2", # Neural progneitor cells
+          "HES6","DLL3", # Hindbrain progenotors
+          "MAP2", "ENO2",  # Neurons
+          "FOXG1", "NEUROD6", # Forebrain neurons
+          "LHX9", "EBF1", # Hindbrain neurons
+          "DLX1", "DLX5", # Gangionic eminence
+          "SIX3", "RORB", # Retina
+          "CRYAB", "GDF15", # Immature choroid plexus (these cells were also associated with neurotransmission! is this really immature choroid plexus needs to be varified)
+          "TTR", "CLDN1", # Choroid plexus
+          "COL1A1", "LUM", # Choroid plexus stroma
+          "MKI67", "EOMES", "OTX2", "DCN" #Misc
+          )
+genes2 <- c("MAP2", "DCX", "SOX2", "SLC17A6", "SLC32A1", "SLC6A2", "SLC6A3", "SLC18A3", "TH", "SLC6A4", "DDC", "SLC5A7", "CHAT", "SLC6A9", "PAX6", "FOXG1", "EOMES", "OTX2", "LHX9", "HOXB2","HOXB5","HOXB7","HOXB9","PRPH","ISL1","PHO2B","POU4F1","SOX10","MKI67")
+
+png("Plots/Co-culture_timecourse/Organoid_data/feature_plot_organoid_genes.png",  width = 4600, height = 6600, res = 500)
+FeaturePlot(seurat, features = genes, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol = 4) & NoAxes() & NoLegend()
+dev.off()
+
+png("Plots/Co-culture_timecourse/Organoid_data/dotplot_celltype_genes.png",  width = 3500, height = 3500, res = 500)
+DotPlot(seurat, features = genes)  + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+```
+
+#### Plot proportions of cells per cluster and protocol.
+```{r plot cell proportions}
+
+DefaultAssay(seurat) <- "RNA"
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$celltype, seurat$sample))
+cells_cl$Var2 <- factor(x = cells_cl$Var2, levels = org_cocult_levels)
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Celltype"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Sample"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/Organoid_data/prop_cells_per_cluster.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Sample, y=Freq, x=Celltype)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cell type") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= col_sample) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$celltype, seurat$sample))
+cells_cl$Var2 <- factor(x = cells_cl$Var2, levels = c("all"))
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Celltype"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Sample"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/Organoid_data/prop_all_cells_per_sample.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Celltype, y=Freq, x="")) +
+    geom_bar(position="fill", stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cell type") +
+    ylab("Proporion of cells") +
+    scale_fill_manual(values = col_ct) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+# Save the object 
+```{r save Seurat object}
+
+# save integrated all time points organoid data
+saveRDS(seurat, "/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/organoid_d3_d15_d30_d58_integrated.rds")
+
+```
+
+# Session info
+```{r session info}
+
+sessionInfo()
+
+```
+

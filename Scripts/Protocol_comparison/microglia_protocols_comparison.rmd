@@ -1,0 +1,731 @@
+---
+title: "Comparison microglia protocols"
+author: "Marina Nikolova"
+date: "14/10/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Install SCpubr.
+```{r SCpubr}
+
+# # From GitHub - Latest stable development version:
+# if(!requireNamespace("devtools", quietly = TRUE)){
+#   install.packages("devtools") # If not installed.
+# }
+# 
+# devtools::install_github("enblacar/SCpubr", ref = "v1.0.1-dev-stable")
+# 
+# # Further packages are needed in order to run the different functions:
+# # Install CRAN packages.
+# cran_packages <- c("circlize",
+#                    "colorspace",
+#                    "dplyr",
+#                    "forcats",
+#                    "ggbeeswarm",
+#                    "ggdist",
+#                    "ggExtra",
+#                    "ggplot2",
+#                    "ggplotify",
+#                    "ggrastr",
+#                    "ggrepel",
+#                    "ggridges",
+#                    "ggsignif",
+#                    "grDevices",
+#                    "grid",
+#                    "magrittr",
+#                    "patchwork",
+#                    "pbapply",
+#                    "plyr",
+#                    "rlang",
+#                    "scales",
+#                    "scattermore",
+#                    "Seurat",
+#                    "stats",
+#                    "stringr",
+#                    "svglite",
+#                    "tibble",
+#                    "tidyr",
+#                    "viridis")
+# 
+# install.packages(cran_packages)
+# 
+# # Install bioconductor packages.
+# bioconductor_packages <- c("ComplexHeatmap",
+#                            "infercnv",
+#                            "Nebulosa")
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install(bioconductor_packages)
+# 
+# # Install github packages.
+# github_packages <- c("ggsankey",
+#                      "liana",
+#                      "monocle3")
+# 
+# if (!requireNamespace("remotes", quietly = TRUE))
+#     install.packages("remotes")
+# 
+# remotes::install_github(github_packages)
+# 
+# install.packages("ggplotify")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+
+# source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+```
+
+```{r load Seurat object}
+
+integrated <- readRDS("Objects/Protocol_comparison/integrated_obj.rds")
+
+```
+
+# Plot basic infromation
+
+#### Plot UMAPs colored by various measures.
+```{r plot overview}
+
+DefaultAssay(integrated) <- "RNA"
+
+pdf("Plots/Protocol_comparison/umap_by_protocol.pdf", width = 6, height = 5)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, group.by = "protocol", cols = c("#EE9B00", "#5F6C25")) & NoAxes() 
+dev.off()
+
+png("Plots/Protocol_comparison/umap_by_protocol.png", width = 2500, height = 1800, res = 400)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, group.by = "protocol", cols = c("#EE9B00", "#5F6C25")) & NoAxes() 
+dev.off()
+
+Idents(integrated) <- "integrated_snn_res.0.2"
+pdf("Plots/Protocol_comparison/umap_by_cluster_res.0.2.pdf", width = 5, height = 4)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, label=F, cols=rev(rainbow_pastel_cols(8))) & NoAxes()
+dev.off()
+
+Idents(integrated) <- "integrated_snn_res.0.2"
+png("Plots/Protocol_comparison/umap_by_cluster_res.0.2.png", width = 2400, height = 1800, res = 400)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, label=F, cols=rev(rainbow_pastel_cols(8))) & NoAxes()
+dev.off()
+
+Idents(integrated) <- "integrated_snn_res.0.5"
+pdf("Plots/Protocol_comparison/umap_by_cluster.pdf", width = 5, height = 4)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, label=F, cols=rev(rainbow_pastel_cols(12))) & NoAxes()
+dev.off()
+
+```
+# Find cluster markers
+
+#### Find cluster markers of all clusters using wilcox.
+```{r find cluster markers}
+
+DefaultAssay(integrated) <- "RNA"
+Idents(integrated) <- "integrated_snn_res.0.2"
+
+cl_markers <- FindAllMarkers(integrated, only.pos = TRUE, min.pct = 0.25, logfc.threshold = log(1.2))
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/Protocol_comparison/top_cl_markers_res.0.2.csv")
+write.csv(top50_cl_markers, "Plots/Protocol_comparison/top50_cl_markers_res.0.2.csv")
+
+```
+
+
+#### Name clusters
+```{r name clusters}
+
+DefaultAssay(integrated) <- "RNA"
+Idents(integrated) <- "integrated_snn_res.0.2"
+
+integrated$celltype <- factor(setNames(c("homeostatic microglia", #
+                                         "proliferating microglia", #
+                                         "migrating microglia", # CHI3L1 (invasion, https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6881255/), TIMP3 inhibits migration so maybe it is counteracting (https://www.nature.com/articles/onc201118), MT2A enahnces invasion and migration (https://cancerci.biomedcentral.com/articles/10.1186/s12935-022-02623-w)
+                                         "homeostatic microglia", #
+                                         "activated microglia", # HLA-DR-genes
+                                         "neutrophil", # neutrophil-like, FCGR3B-pos (CD16b) and CEACAM8-pos (CD66b) https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8773660/
+                                         "mast cell", # mast-cell like, https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8246912/ and https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5862545/ and https://www.nature.com/articles/s41467-019-10291-0 ; ITGA2-neg (CD49b-neg) and KIT-pos (CD117-pos) in addition to other common to basophil and neutrophil markers such as CLC and GATA2
+                                         "smooth muscle cell" # TFPI,IGFBP5, TPM2, KRT18, MT2A high
+                                         ), levels(integrated@active.ident))[integrated@active.ident])
+my_levels <- factor(c("proliferating microglia",
+                      "migrating microglia",
+                      "activated microglia",
+                      "homeostatic microglia",
+                      "mast cell",
+                      "neutrophil", 
+                      "smooth muscle cell"))
+
+Idents(integrated) <- "celltype"
+integrated$celltype <- factor(integrated$celltype, levels = my_levels)
+ct <- c("proliferating microglia" = "#9A5C6B",
+                      "migrating microglia"  = "#52788B",
+                      "activated microglia" = "#4C8F69",
+                      "homeostatic microglia" = "#ACA64D",
+                      "mast cell" = "#E29C33",
+                      "neutrophil" = "#DA7331", 
+                      "smooth muscle cell" = "#DD4345")
+
+pdf("Plots/Protocol_comparison/umap_by_celltype.pdf", width = 8, height = 4)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, label=F, cols=ct) & NoAxes()
+dev.off()
+
+png("Plots/Protocol_comparison/umap_by_celltype.png",  width = 2800, height = 1800, res = 400)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, label=F, cols=ct) & NoAxes()
+dev.off()
+
+```
+
+#### Recalcualte cluster markers of all clusters using wilcox.
+```{r find cluster markers of cell types}
+
+DefaultAssay(integrated) <- "RNA"
+Idents(integrated) <- "celltype"
+
+cl_markers <- FindAllMarkers(integrated, only.pos = TRUE, min.pct = 0.25, logfc.threshold = log(1.2))
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/Protocol_comparison/top_cl_markers_celltype.csv")
+write.csv(top50_cl_markers, "Plots/Protocol_comparison/top50_cl_markers_celltype.csv")
+
+```
+
+#### Plot cluster markers.
+```{r heatmap top markers by cell type, fig.height=7, fig.width=4}
+
+# top5_cl_markers <- top5_cl_markers %>% arrange(factor(cluster, levels = my_levels))
+
+DefaultAssay(integrated) <- "RNA"
+Idents(integrated) <- "celltype"
+
+avgexp <- AverageExpression(integrated, return.seurat = T)
+
+pdf("Plots/Protocol_comparison/heatmap_top10_markers_celltype.pdf", width = 5, height = 11)
+DoHeatmap(avgexp, features = top10_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = rev(rainbow_pastel_cols(7))) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+pdf("Plots/Protocol_comparison/heatmap_top50_markers_celltype.pdf", width = 5, height = 30)
+DoHeatmap(avgexp, features = top50_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = rev(rainbow_pastel_cols(7))) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+library(gplots)
+avg_cond_cl <- sapply(levels(integrated$celltype), function(x) rowMeans(integrated@assays$RNA@data[,which(integrated$celltype==x)]))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+mat_norm <- apply(avg_cond_cl[top2_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top2_cl_markers$gene
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Protocol_comparison/heatmap_scaled_top2_markers_celltype.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# for top 10 markers
+mat_norm <- apply(avg_cond_cl[top10_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top10_cl_markers$gene
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Protocol_comparison/heatmap_scaled_top10_markers_celltype.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# for top 50 markers
+mat_norm <- apply(avg_cond_cl[top50_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top50_cl_markers$gene
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Protocol_comparison/heatmap_scaled_top50_markers_celltype.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+
+#### Cell type markers
+Generate plots with markers of various clusters
+```{r feature plots}
+
+DefaultAssay(integrated) <- "RNA"
+
+genes <- c("PTPRC", "SPP1", "AIF1", "CX3CR1", "RUNX1", "SPI1", "CSF1R", "AXL", "ITGAX")
+markers <- c("MKI67", # proliferating microglia
+             "MMP7", # migrating microglia
+             "GPR183", # homeostatic microglia
+             "HLA-DRA", # antigen-presenting microglia
+             "RETN", # neutrophil
+             "HDC", # mast cell
+             "TPM2" # smooth muscle cell
+                )
+
+pdf("Plots/Protocol_comparison/feature_plot_microglia_genes.pdf",  width = 12, height = 8)
+FeaturePlot(integrated, features = genes, cols = green_feature_cols(10), order = T, pt.size = 1) & NoAxes()
+dev.off()
+
+pdf("Plots/Protocol_comparison/feature_plot_celltype_markers.pdf",  width = 8, height = 12)
+FeaturePlot(integrated, features = markers, cols = green_feature_cols(10), order = T, pt.size = 1, ncol=2) & NoAxes()
+dev.off()
+
+
+png("Plots/Protocol_comparison/feature_plot_microglia_genes.png",  width = 3600, height = 3000, res = 400)
+FeaturePlot(integrated, features = genes, cols = green_feature_cols(10), order = T, pt.size = 0.6) & NoLegend () & NoAxes()
+dev.off()
+
+png("Plots/Protocol_comparison/feature_plot_celltype_markers.png",  width = 3600, height = 3000, res = 400)
+FeaturePlot(integrated, features = markers, cols = green_feature_cols(10), order = T, pt.size = 0.6, ncol=3) & NoLegend () & NoAxes()
+dev.off()
+
+```
+
+#### Plot proportions of cells per cluster and protocol.
+```{r plot cell proportions}
+
+DefaultAssay(integrated) <- "RNA"
+
+# create a dataset
+cells_cl <- as.data.frame(table(integrated$celltype, integrated$orig.ident))
+cells_cl$Var1 <- factor(x = cells_cl$Var1, levels = my_levels)
+cells_cl$Var2 <- factor(x = cells_cl$Var2, levels = c("Brownjohn", "McQuade"))
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Cluster"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Protocol"
+
+# Stacked
+pdf("Plots/Protocol_comparison/prop_cells_per_celltype.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Protocol, y=Freq, x=Cluster)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cluster") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= c("#EE9B00", "#5F6C25")) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+# create a dataset
+cells_cl_prop <- as.data.frame(table(integrated$celltype, integrated$orig.ident))
+cells_cl_prop$Var1 <- factor(x = cells_cl_prop$Var1, levels = my_levels)
+cells_cl_prop$Var2 <- factor(x = cells_cl_prop$Var2, levels = c("all"))
+
+colnames(cells_cl_prop)[which(names(cells_cl_prop) == "Var1")] <- "Cluster"
+colnames(cells_cl_prop)[which(names(cells_cl_prop) == "Var2")] <- "Protocol"
+
+# Stacked
+pdf("Plots/Protocol_comparison/prop_all_cells_per_celltype.pdf",  width = 6, height = 5)
+ggplot(cells_cl_prop, aes(fill=Cluster, y=Freq, x = "")) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cluster") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= rev(rainbow_pastel_cols(7))) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+table(integrated$celltype)
+
+```
+
+# Gene ontology 
+ 
+Gene ontology (http://www.geneontology.org/) provides a controlled vocabulary for describing biological processes (BP ontology), molecular functions (MF ontology) and cellular components (CC ontology)
+Enrichment analysis provides one way of drawing conclusions about a set of differential expression results.
+
+A useful link with information and example is: 
+https://ucdavis-bioinformatics-training.github.io/2019_March_UCSF_mRNAseq_Workshop/differential_expression/enrichment.html
+
+The steps here followe closely this demo:
+https://ycl6.github.io/GO-Enrichment-Analysis-Demo/index.html
+
+
+#### Load and explore Annotationhub.
+```{r AnnotationHub}
+
+library(topGO)
+
+# List available organism-level packages for installation in BiocManager.
+# BiocManager::available("^org\\.")
+# Download and install the Arabidopsis thaliana (thale cress) package
+#BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+org.Hs.eg.db
+
+# The above method returns a limited number of organism-level annotation packages. There are a lot more packages available from the Biocondnuctor’s AnnotationHub service
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+# install.packages("BiocManager")
+# BiocManager::install("AnnotationHub")
+library(AnnotationHub)
+ah <- AnnotationHub()
+ah
+# URL f or the online AnnotationHub
+hubUrl(ah)
+
+# library(Signac)
+# # get gene annotations for hg38
+# ensdb.list <- query(ah, c("EnsDb.Hsapiens"))
+# mat <- cbind(ensdb.list$ah_id, ensdb.list$title)
+# ens.version <- 93 # ensembl v93, same as the RNA ref (cellranger-ref v3.0)
+# id <- mat[which(mat[,2]==paste("Ensembl", ens.version, "EnsDb for Homo Sapiens")),1]
+# ensdb <- ensdb.list[[id]]
+# seqlevelsStyle(ensdb) <- 'UCSC'
+# annotations <- GetGRangesFromEnsDb(ensdb = ensdb)
+# genome(annotations) <- "hg38"
+
+# Search for organism-level packages with a pattern-matching string “^org\\.”.
+db <- query(ah, "^org\\.")
+df <- mcols(db)
+class(df)
+
+# Show query results stored in DFrame as column names
+cbind(colnames(df))
+# Number of org records
+nrow(df)
+# Show df
+df[,c("title", "species")]
+
+# Shows which kinds of data can be returned for the AnnotationDb object.
+# Both objects contain Gene Ontology mapping information.
+columns(org.Hs.eg.db)
+# Shows which columns can be used as keys.
+keytypes(org.Hs.eg.db)
+
+```
+
+#### GO Enrichment Analysis
+```{r GO Enrichment Analysis}
+
+library("topGO")
+library("org.Hs.eg.db")
+
+
+```
+
+#### EnrichR
+DE and EnrichR pathway visualization barplot generation.
+```{r DE and EnrichR}
+
+# DEenrichRPlot is a function by Seurat. 
+# Default, which was used here, is to peform "wilcox" test between a group of cells and another group of cells. 
+# Here I used some cell types against all other cells. Minimum p-values is 0.05 and the log fold change threshold I used is 0.3. 
+# Different enrichR databases can be used (list here: https://maayanlab.cloud/Enrichr/#libraries) but I used only the Reactome 2022 for this analysis.
+
+library(enrichR)
+
+Idents(integrated) <- "celltype"
+
+pdf("Plots/Protocol_comparison/reactome_2022_homeostatic_microglia.pdf",  width = 10, height = 5)
+DEenrichRPlot(object = integrated, ident.1 = "homeostatic microglia", ident.2 = c("proliferating microglia", "migrating microglia", "activated microglia", "mast cell", "neutrophil", "smooth muscle cell"), enrich.database = "Reactome_2022", max.genes = 50, balanced = T, retunrn.gene.list = T, logfc.threshold = 0.3, cols = c("black"))
+dev.off()
+
+pdf("Plots/Protocol_comparison/reactome_2022_activated_microglia.pdf",  width = 10, height = 5)
+DEenrichRPlot(object = integrated, ident.1 = "activated microglia", ident.2 = c("proliferating microglia", "migrating microglia", "homeostatic microglia", "mast cell", "neutrophil", "smooth muscle cell"), enrich.database = "Reactome_2022", max.genes = 50, balanced = T, logfc.threshold = 0.3)
+dev.off()
+
+pdf("Plots/Protocol_comparison/reactome_2022_migrating_microglia.pdf",  width = 10, height = 5)
+DEenrichRPlot(object = integrated, ident.1 = "migrating microglia", ident.2 = c("proliferating microglia", "activated microglia", "homeostatic microglia", "mast cell", "neutrophil", "smooth muscle cell"), enrich.database = "Reactome_2022", max.genes = 50, balanced = T, logfc.threshold = 0.3)
+dev.off()
+
+```
+
+# Cell cycle scoring
+
+#### Perform cell cycle scoring
+Load cell cycle genes.
+```{r load cell cycle genes}
+
+# Read in the expression matrix The first row is a header row, the first column is rownames
+exp.mat <- read.table(file = "/home/marinani/PhD_Projects/Vascular_Organoids/Analysis/cell_cycle_regression/cell_cycle_vignette_files/nestorawa_forcellcycle_expressionMatrix.txt", header = TRUE,
+  as.is = TRUE, row.names = 1)
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+```
+
+Cell cycle scoring.
+```{r cell cycle scoring}
+
+integrated <- CellCycleScoring(integrated, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+# view cell cycle scores and phase assignments
+head(integrated[[]])
+
+# Visualize the distribution of cell cycle markers across phases
+RidgePlot(integrated, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
+
+pdf("Plots/Protocol_comparison/umap_by_phase.pdf", width = 6, height = 4)
+DimPlot(integrated, reduction = "umap", pt.size = 0.5, group.by = "Phase", cols = c("#bdbdbd", "#737373",  "#252525")) & NoAxes() 
+dev.off()
+
+```
+
+Plot cell cycle scores.
+```{r plot cell cycle scores}
+
+# by cell type
+# create a dataset
+phases <- as.data.frame(table(integrated$celltype, integrated$Phase))
+phases$Var1 <- factor(x = phases$Var1, levels = my_levels)
+phases$Var2 <- factor(x = phases$Var2, levels = c( "G1", "S", "G2M"))
+
+colnames(phases)[which(names(phases) == "Var1")] <- "Celltype"
+colnames(phases)[which(names(phases) == "Var2")] <- "Phase"
+
+# Stacked
+pdf("Plots/Protocol_comparison/prop_cells_in_phase_per_celltype.pdf",  width = 10, height = 5)
+ggplot(phases, aes(fill=Phase, y=Freq, x=Celltype)) + 
+      geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cell type") + 
+    ylab("Proporion of cells in cell cycle phases") +
+    coord_flip() +
+    scale_fill_manual(values=c("#bdbdbd", "#737373",  "#252525")) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+
+# by protocol
+# create a dataset
+phases <- as.data.frame(table(integrated$protocol, integrated$Phase))
+phases$Var1 <- factor(x = phases$Var1, levels = c("Brownjohn", "McQuade"))
+phases$Var2 <- factor(x = phases$Var2, levels = c( "G1", "S", "G2M"))
+
+colnames(phases)[which(names(phases) == "Var1")] <- "Protocol"
+colnames(phases)[which(names(phases) == "Var2")] <- "Phase"
+
+# Stacked
+pdf("Plots/Protocol_comparison/prop_cells_in_phase_per_protocol.pdf",  width = 10, height = 4)
+ggplot(phases, aes(fill=Phase, y=Freq, x=Protocol)) + 
+      geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Protocol") + 
+    ylab("Proporion of cells in cell cycle phases") +
+    coord_flip() +
+    scale_fill_manual(values=c("#bdbdbd", "#737373",  "#252525")) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+```
+#### Save object
+Save the integrated object with the additional cell cycle scores and new annotations.
+```{r save the integarted annotated iMGL object}
+
+saveRDS(integrated, "/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Protocol_comparison/integrated_obj.rds")
+
+```
+
+# Comparison to primary microglia
+
+## Compare to primary fetal microglai from Kracht et al. 2020
+
+```{r load and prepare primary microglia Kracht}
+
+## DE to primary fetal microglia
+seurat_MG <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/Kracht_primary_microglia_seurat.rds")
+
+```
+
+```{r Seurat-based label transfer}
+
+# Perform Seurat label transfer for projection of the reference onto the query (iPSC-dervied) microglia
+# Find anchors
+anchors <- FindTransferAnchors(reference = seurat_MG, query = integrated, dims = 1:50, npcs = 50, reduction = "rpca", k.filter = NA,verbose = F)
+# Transfer the categorical information across the two datasets as predict.id
+# Seurat does not correct or modify the query expression data
+# Label transfer based on timepoint
+predictions <- TransferData(anchorset = anchors, query = integrated, refdata = as.character(seurat_MG$timepoint_wks), dims = 1:50, weight.reduction = "pca") # project the PCA structure of the reference onto the query by default (this can be changed with the weight.reduction parameter). TransferData returns a matrix with predicted IDs and prediction scores, which we can add to the query metadata.
+integrated$timepoint_wks_transfer <- predictions$predicted.id
+
+# Label transfer based on cell type
+predictions <- TransferData(anchorset = anchors, query = integrated, refdata = as.character(seurat_MG$celltype), dims = 1:50, weight.reduction = "pca")
+integrated$celltype_transfer <- predictions$predicted.id
+
+# Order metadata levels
+levels_primary_wks <- factor(c(9, 10, 11, 12, 13, 15, 16, 17, 18))
+seurat_MG$timepoint_wks <- factor(seurat_MG$timepoint_wks, levels = levels_primary_wks)
+integrated$timepoint_wks_transfer <- factor(integrated$timepoint_wks_transfer, levels = levels_primary_wks)
+
+# Plot the original primary data
+pdf("Plots/Protocol_comparison/kracht_umap_by_week.pdf",  width = 6, height = 5)
+DimPlot(seurat_MG, group.by="timepoint_wks", reduction="umap", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+png("Plots/Protocol_comparison/kracht_umap_by_week.png",  width = 2700, height = 2600, res = 500)
+DimPlot(seurat_MG, group.by="timepoint_wks", reduction="umap", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+
+# Plot the label transfer by timepoint
+pdf("Plots/Protocol_comparison/transfer_kracht_by_week.pdf",  width = 6, height = 5)
+DimPlot(integrated, group.by="timepoint_wks_transfer", reduction="umap", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+png("Plots/Protocol_comparison/transfer_kracht_by_week.png",  width = 3200, height = 2600, res = 500)
+DimPlot(integrated, group.by="timepoint_wks_transfer", reduction="umap", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+
+
+# Plot the label transfer by cell type
+pdf("Plots/Protocol_comparison/transfer_kracht_by_celltype.pdf",  width = 8, height = 5)
+DimPlot(integrated, group.by="celltype_transfer", reduction="umap", pt.size = 0.6, cols = col_primary_ct) & NoAxes()
+dev.off()
+png("Plots/Protocol_comparison/transfer_kracht_by_celltype.png",  width = 4100, height = 2600, res = 500)
+DimPlot(integrated, group.by="celltype_transfer", reduction="umap", pt.size = 0.6, cols =  col_primary_ct) & NoAxes()
+dev.off()
+
+Idents(integrated) <- "celltype_transfer"
+# susbet cells from each sample
+hme <- WhichCells(integrated, idents = c("Homeostatic microglia (early)"))
+hml <- WhichCells(integrated, idents = c("Homeostatic microglia (late)"))
+am <- WhichCells(integrated, idents = c("Activated microglia"))
+pm <- WhichCells(integrated, idents = c("Proliferating microglia"))
+sm <- WhichCells(integrated, idents = c("SOX-medium microglia"))
+mo <- WhichCells(integrated, idents = c("Monocyte"))
+pem <- WhichCells(integrated, idents = c("Perivascular macrophage"))
+er <- WhichCells(integrated, idents = c("Erythrocyte"))
+
+# plot each sample separately
+png("Plots/Protocol_comparison/umap_by_celltype_transfer.png", width = 5000, height = 2600, res = 400)
+(DimPlot(integrated, cells.highlight = hml,  reduction="umap", cols.highlight = c("#9A5C6B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(integrated, cells.highlight = hml,  reduction="umap", cols.highlight = c("#5F718B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(integrated, cells.highlight = am,  reduction="umap", cols.highlight = c("#41867A"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(integrated, cells.highlight = pm,  reduction="umap", cols.highlight = c("#5C9160"), cols = "lightgray", order = T) & NoAxes() & NoLegend()) / 
+(DimPlot(integrated, cells.highlight = sm,  reduction="umap", cols.highlight = c("#ACA64D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(integrated, cells.highlight = mo,  reduction="umap", cols.highlight = c("#DD862C"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(integrated, cells.highlight = pem,  reduction="umap", cols.highlight = c("#DA6835"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(integrated, cells.highlight = er,  reduction="umap", cols.highlight = c("#DD4345"), cols = "lightgray", order = T) & NoAxes() & NoLegend())
+dev.off()
+
+```
+#### Plot proportions of cells per condition transfered from kracht et al.
+```{r plot cell proportions transfered from primary data}
+
+DefaultAssay(integrated) <- "RNA"
+
+# create a dataset to check which cell type is contained in each sample
+cells_pr <- as.data.frame(table(integrated$protocol, integrated$celltype_transfer))
+cells_pr$Var1 <- factor(x = cells_pr$Var1, levels = c("Brownjohn", "McQuade"))
+cells_pr$Var2 <- factor(x = cells_pr$Var2, levels = mg_primary_ct_levels)
+
+colnames(cells_pr)[which(names(cells_pr) == "Var1")] <- "Protocol"
+colnames(cells_pr)[which(names(cells_pr) == "Var2")] <- "Celltype"
+
+# Stacked
+pdf("Plots/Protocol_comparison/prop_transferred_cells_per_protocol.pdf",  width = 6, height = 8)
+ggplot(cells_pr, aes(fill=Celltype, y=Freq, x=Protocol)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Protocol") + 
+    ylab("Transferred celltype") +
+    scale_fill_manual(values= col_primary_ct) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+# create a dataset to check what proportion of each cell type is made up of which sample 
+cells_pr <- as.data.frame(table(integrated$protocol, integrated$celltype_transfer))
+cells_pr$Var1 <- factor(x = cells_pr$Var1, levels = c("Brownjohn", "McQuade"))
+cells_pr$Var2 <- factor(x = cells_pr$Var2, levels = mg_primary_ct_levels)
+
+colnames(cells_pr)[which(names(cells_pr) == "Var1")] <- "Protocol"
+colnames(cells_pr)[which(names(cells_pr) == "Var2")] <- "Celltype"
+
+# Stacked
+pdf("Plots/Protocol_comparison/prop_protocol_for_each_celltype.pdf",  width = 6, height = 8)
+ggplot(cells_pr, aes(fill=Protocol, y=Freq, x=Celltype)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Celltype") + 
+    ylab("Protocol") +
+    scale_fill_manual(values= c("#EE9B00", "#5F6C25")) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+# create a dataset
+cells_pr <- as.data.frame(table(integrated$protocol, integrated$timepoint_wks_transfer))
+cells_pr$Var1 <- factor(x = cells_pr$Var1, levels = c("Brownjohn", "McQuade"))
+cells_pr$Var2 <- factor(x = cells_pr$Var2, levels = levels_primary_wks)
+
+colnames(cells_pr)[which(names(cells_pr) == "Var1")] <- "Protocol"
+colnames(cells_pr)[which(names(cells_pr) == "Var2")] <- "Timepoint"
+
+# Stacked
+pdf("Plots/Protocol_comparison/prop_transferred_timepoint_per_protocol.pdf",  width = 6, height = 8)
+ggplot(cells_pr, aes(fill=Timepoint, y=Freq, x=Protocol)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Protocol") + 
+    ylab("Transferred celltype") +
+    scale_fill_manual(values= vintage_rich_cols(11)) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+```
+
+```{r similarity spectrum to reference}
+
+# Calculate Reference Similarity Spectrum (RSS), given expression of the data and expression of the meta niches of the primary fetal microglia
+sim2_MG_niches <- ref_sim_spectrum(integrated@assays$RNA@data, avg_expr_niches[vargenes_niches,], scale=F)
+dimnames(sim2_MG_niches) <- list(colnames(integrated), colnames(avg_expr_niches))
+cols_MG_ct <- setNames(c("#A569BD","#E59866","#E74C3C","#F4D03F","#82E0AA","#5DADE2","#52BE80","#27AE60","#48C9B0","#17A589"), levels(meta_niches$celltype))
+
+# plot similarity to the primary microglia similarity spectrum score
+png("Plots/Protocol_comparison/css_similarity_to_primary_umap.png", width = 2300, height = 1700, res = 400)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(integrated,"umap"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+pdf("Plots/Protocol_comparison/css_similarity_to_primary_umap.pdf", width = 4, height = 4)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(integrated,"umap"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+# max sim 0.6871978
+# min sim  -0.02968004
+
+library("vioplot")
+# plot the similarity to primary microglia as a score as a boxplot
+idx_MG <- which(!integrated@active.ident %in% as.character(6:9))
+pdf("Plots/Protocol_comparison/css_similarity_to_primary_boxplot.pdf", width = 4, height = 4)
+par(mar=c(10,5,1,1)); boxplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], integrated$protocol[idx_MG], list), las=2, frame=F, pch=21, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = c("#EE9B00", "#5F6C25"), outcex = 0.2)
+dev.off()
+pdf("Plots/Protocol_comparison/css_similarity_to_primary_vlnplot.pdf", width = 4, height = 4)
+par(mar=c(10,5,1,1)); vioplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], integrated$protocol[idx_MG], list), las=2, frame=F, pch=19, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = c("#EE9B00", "#5F6C25"))
+dev.off()
+
+```
+#### Save object
+Save the integrated object with the additional cell cycle scores and new annotations.
+```{r save iMGL wiht Kracht label transfer}
+
+saveRDS(integrated, "/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Protocol_comparison/integrated_obj.rds")
+
+```
+
+# Info about the RStudio session
+```{r session info}
+
+sessionInfo()
+
+```
+

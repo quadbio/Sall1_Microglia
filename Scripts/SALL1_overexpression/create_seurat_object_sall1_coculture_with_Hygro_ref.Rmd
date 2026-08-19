@@ -1,0 +1,176 @@
+---
+title: "SALL1 OE iMGL exp3 organoid coculture (with Hygromycin-selection reference)"
+author: "Marina Nikolova"
+date: "2024-12-01"
+output: html_document
+---
+
+
+# Basic setup
+## Prepare the environment
+```{r setup, include=FALSE, echo = F}
+
+# set working directory for the whole Rmarkdown (with setwd () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/SALL1_Overexpression/SALL1_OE_exp3_coculture/Analysis")
+
+```
+
+## Load packages
+```{r load packages, echo = F}
+
+library(Seurat)
+library(dplyr)
+library(SeuratWrappers)
+library(simspec)
+library(presto)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+```
+
+
+# General data preparation
+#### Read in the data
+```{r reading the data}
+
+gfp_mg_cocul_d15 <- CreateSeuratObject(Read10X("/links/groups/treutlein/DATA/sequencing/20240606_P2808_MARINA_SALL1_microglia_coculture_d15_d30/processed_with_Hygro_ref/GFP_MGcoculture_d15/outs/filtered_feature_bc_matrix/"), project = "GFP_MG_COCUL_D15")
+gfp_mg_cocul_d29 <- CreateSeuratObject(Read10X("/links/groups/treutlein/DATA/sequencing/20240606_P2808_MARINA_SALL1_microglia_coculture_d15_d30/processed_with_Hygro_ref/GFP_MGcoculture_d29/outs/filtered_feature_bc_matrix/"), project = "GFP_MG_COCUL_D29")
+sall1_mg_cocul_d15 <- CreateSeuratObject(Read10X("/links/groups/treutlein/DATA/sequencing/20240606_P2808_MARINA_SALL1_microglia_coculture_d15_d30/processed_with_Hygro_ref/SALL1_MGcoculture_d15/outs/filtered_feature_bc_matrix/"), project = "SALL1_MG_COCUL_D15")
+sall1_mg_cocul_d29 <- CreateSeuratObject(Read10X("/links/groups/treutlein/DATA/sequencing/20240606_P2808_MARINA_SALL1_microglia_coculture_d15_d30/processed_with_Hygro_ref/SALL1_MGcoculture_d29/outs/filtered_feature_bc_matrix/"), project = "SALL1_MG_COCUL_D29")
+
+```
+
+```{r create a merged object}
+
+srt_obj_list <- list(gfp_mg_cocul_d15, gfp_mg_cocul_d29, sall1_mg_cocul_d15, sall1_mg_cocul_d29)
+srt_obj_list <- lapply(X = srt_obj_list, FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- PercentageFeatureSet(x, "^MT-", col.name = "percent.mt")
+})
+
+
+merged <- merge(x = srt_obj_list[[1]], y = srt_obj_list[-1])
+
+```
+
+#### QC and integration
+```{r check QC pre-filtering}
+
+# reorder the samples in the metadata to appear in the order desired by us
+sall1_levels <- factor(c("GFP_MG_COCUL_D15", "GFP_MG_COCUL_D29", "SALL1_MG_COCUL_D15", "SALL1_MG_COCUL_D29"))
+merged$orig.ident <- factor(merged$orig.ident, levels = sall1_levels)
+Idents(merged) <- "orig.ident"
+# generate color palette based on vintage_cols palette
+sall1_col <-setNames(c(c("#E69000", "#d64b0f", "#99cfc9","#026D7D")), sall1_levels)
+
+pdf("Plots/nFeature_pre-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/nCount_pre-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/percent.mt_pre-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+```
+
+```{r filter cells and filtering}
+
+# subset cells based on QC metrics
+merged <- subset(merged, subset =  nFeature_RNA > 700 & percent.mt < 30)
+
+```
+
+```{r check QC post-filtering}
+
+pdf("Plots/nFeature_post-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/nCount_post-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/percent.mt_post-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+```
+
+```{r pre-process and integrate}
+
+seurat <- FindVariableFeatures(merged, nfeatures = 5000) %>%
+  CellCycleScoring(g2m.features = cc.genes.updated.2019$g2m.genes, s.features = cc.genes.updated.2019$s.genes)
+blacklist <- c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(seurat), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+VariableFeatures(seurat) <- setdiff(VariableFeatures(seurat), blacklist)
+seurat <- ScaleData(seurat) %>%
+  RunPCA(npcs = 30, verbose=F) 
+
+seurat <- cluster_sim_spectrum(seurat, label_tag="orig.ident", cluster_resolution = 1)
+seurat <- RunUMAP(seurat, reduction="css", dims=1:ncol(Embeddings(seurat,"css")), reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 46)
+
+seurat <- FindNeighbors(seurat, reduction="css", dims=1:ncol(Embeddings(seurat,"css"))) %>%
+  FindClusters(resolution = 0.1) %>%
+  FindClusters(resolution = 0.2) %>%
+  FindClusters(resolution = 0.3) %>%
+  FindClusters(resolution = 0.4) %>%
+  FindClusters(resolution = 0.5) %>%
+  FindClusters(resolution = 0.6) %>%
+  FindClusters(resolution = 0.8) %>%
+  FindClusters(resolution = 10)
+
+```
+
+#### Subset based on vector decetion
+
+```{r add more metadata}
+
+Idents(seurat)<-"orig.ident"
+seurat$condition <- seurat$orig.ident
+seurat$condition <- gsub("GFP_MG_COCUL_D15", "control", seurat$condition)
+seurat$condition <- gsub("GFP_MG_COCUL_D29", "control", seurat$condition)
+seurat$condition <- gsub("SALL1_MG_COCUL_D15", "OE", seurat$condition)
+seurat$condition <- gsub("SALL1_MG_COCUL_D29", "OE", seurat$condition)
+seurat$timepoint <- seurat$orig.ident
+seurat$timepoint <- gsub("GFP_MG_COCUL_D15", "D15", seurat$timepoint)
+seurat$timepoint <- gsub("GFP_MG_COCUL_D29", "D29", seurat$timepoint)
+seurat$timepoint <- gsub("SALL1_MG_COCUL_D15", "D15", seurat$timepoint)
+seurat$timepoint <- gsub("SALL1_MG_COCUL_D29", "D29", seurat$timepoint)
+
+table(seurat$condition)
+# control      OE 
+#   17298    16705 
+
+table(seurat$timepoint)
+#  D15   D29 
+# 8372 25631 
+
+table(seurat$timepoint, seurat$condition)
+#       control    OE
+#  D15    4543  3829
+#  D29   12755 12876
+
+DimPlot(seurat, reduction = "umap_css", group.by = "orig.ident", split.by = "orig.ident")
+FeaturePlot(seurat, reduction = "umap_css", features = c("percent.mt", "nFeature_RNA", "nCount_RNA"), order = T)
+FeaturePlot(seurat, reduction = "umap_css", features = c("SALL1"), order = T, split.by = "orig.ident")
+DotPlot(seurat, features = c("SALL1"))
+
+```
+
+
+```{r save integrated object}
+
+saveRDS(seurat, "/home/marinani/PhD_Projects/Microglia/SALL1_Overexpression/SALL1_OE_exp3_coculture/Analysis/Objects/sall1_mg_exp3_cocul_integrated.rds")
+
+```
+
+# Session info
+```{r session info}
+
+sessionInfo()
+
+```
+

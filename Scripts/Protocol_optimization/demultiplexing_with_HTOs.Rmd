@@ -1,0 +1,341 @@
+---
+title: "Microglia optimization HTO assignment"
+author: "Marina Nikolova"
+date: "03/11/2022"
+output: html_document
+---
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+```
+
+#### Read in the data
+```{r reading the data}
+
+# Load the mRNA count matrices
+mg1.umi <- Read10X("/links/groups/treutlein/DATA/sequencing/20220825_P2092_MARINA_Mg_opt_and_BVO_HTO_repeat/processed/MG_opt_1/outs/filtered_feature_bc_matrix/")
+mg2.umi <- Read10X("/links/groups/treutlein/DATA/sequencing/20220825_P2092_MARINA_Mg_opt_and_BVO_HTO_repeat/processed/MG_opt_2/outs/filtered_feature_bc_matrix/")
+
+# Save the mRNA count natrices as rds files
+saveRDS(mg1.umi, "Objects/Protocol_optimization/mg1_umi_mtx.rds")
+saveRDS(mg1.umi, "Objects/Protocol_optimization/mg2_umi_mtx.rds")
+
+# Load the HTO count matrices
+hto1 <- readRDS("Objects/Protocol_optimization/hto1_mtx.rds")
+hto2 <- readRDS("Objects/Protocol_optimization/hto2_mtx.rds")
+
+# Check the number of cells
+ncol(mg1.umi) # 10651
+ncol(mg2.umi) # 10903
+
+```
+
+```{r prepare mRNA matrices}
+
+# The column names (cells) have an additional "-1" which is not present in the HTO counts
+# To allow for joining of the common barcodes in both matrices, we rename the barcodes by removing the additional "-1" pattern
+colnames_mg1 <- colnames(mg1.umi)
+colnames_mg1 <- gsub("-1", "", colnames_mg1)
+colnames(mg1.umi) <- colnames_mg1
+
+colnames_mg2 <- colnames(mg2.umi)
+colnames_mg2 <- gsub("-1", "", colnames_mg2)
+colnames(mg2.umi) <- colnames_mg2
+
+```
+
+
+#### Generate joint barcode matrices
+```{r joint matrices}
+
+# Select cell barcodes detected by both RNA and HTO 
+mg1.joint.bcs <- intersect(colnames(mg1.umi), colnames(hto1))
+mg2.joint.bcs <- intersect(colnames(mg2.umi), colnames(hto2))
+
+# Check how many cells have an assigned barcode
+table(colnames(mg1.umi) %in% colnames(hto1))
+#FALSE  TRUE 
+#  816  9835 
+  
+table(colnames(mg2.umi) %in% colnames(hto2))
+#FALSE  TRUE 
+#  987  9916 
+  
+# Subset RNA and HTO counts by joint cell barcodes
+mg1.umi <- mg1.umi[, mg1.joint.bcs]
+mg2.umi <- mg2.umi[, mg2.joint.bcs]
+
+hto1 <- as.matrix(hto1[, mg1.joint.bcs])
+hto2 <- as.matrix(hto2[, mg2.joint.bcs])
+
+# Confirm that the HTO have the correct names
+rownames(hto1)
+rownames(hto2)
+
+```
+
+#### Setup Seurat object and add in the HTO data
+```{r setup seurat with HTO}
+
+# Setup Seurat object
+mg1.hashtag <- CreateSeuratObject(counts = mg1.umi, project = "Replicate1")
+mg2.hashtag <- CreateSeuratObject(counts = mg2.umi, project = "Replicate2")
+
+# Normalize, find variable features, scale the data and run PCA on the RNA data with log normalization
+mg1.hashtag <- NormalizeData(mg1.hashtag) 
+mg2.hashtag <- NormalizeData(mg2.hashtag) 
+
+```
+
+# Demultiplex cells based on HTO enrichment
+#### Add HTO as an indepent assay to the Seurat object
+```{r add HTO data}
+
+# Add HTO data as a new assay independent from RNA
+mg1.hashtag[["HTO"]] <- CreateAssayObject(counts = hto1)
+mg2.hashtag[["HTO"]] <- CreateAssayObject(counts = hto2)
+
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+mg1.hashtag <- NormalizeData(mg1.hashtag, assay = "HTO", normalization.method = "CLR", margin = 2)
+mg2.hashtag <- NormalizeData(mg2.hashtag, assay = "HTO", normalization.method = "CLR", margin = 2)
+
+
+# Important about normalization
+# Normalization of the data leads to vastly different results, I tested this.
+# For CLR (centered log ratio), one can choose margin = 1 (normalize across features) or margin = 2 (normalize across cells). 
+# According to people from Satija lab, in some cases, cell-based normalization fails. 
+# This is because cell-normalization makes an assumption that the total ADT/HTO counts should be constant across cells. 
+# That can become a significant issue if you have cell populations in your data, but did not add protein markers for them (this is also an issue for scRNA-seq, but is significantly mitigated because at least you measure many genes).
+# However, gene-based normalization can fail when there is significant heterogeneity in sequencing depth, or cell size. The optimal strategy depends on the AB panel, and heterogeneity of the sample.
+# It is wise to try both across features and across genes, as I did here. Unfortunately, there is no one clear and correct answer...
+
+```
+
+#### Demultiplex using the Seurat function HTODemux() to assign single cells back to their sample origins
+```{r demultiplex}
+
+# If one has a very large dataset Seurat suggests using k_function = 'clara'. 
+# This is a k-medoid clustering function for large applications 
+# One can also play with additional parameters (see documentation for HTODemux()) to adjust the threshold for classification 
+# Here I am using the default settings
+mg1.hashtag <- HTODemux(mg1.hashtag, assay = "HTO", positive.quantile = 0.99)
+mg2.hashtag <- HTODemux(mg2.hashtag, assay = "HTO", positive.quantile = 0.99)
+
+```
+
+# Visualization
+#### Output from running HTODemux() is saved in the object metadata
+#### We can visualize how many cells are classified as singlets, doublets and negative/ambiguous cells
+```{r visualize HTO classification}
+
+# Global classification results
+table(mg1.hashtag$HTO_classification.global)
+# Doublet Singlet 
+#    1556    8279 
+table(mg2.hashtag$HTO_classification.global) 
+# Doublet Negative  Singlet 
+#    1795      137     7984 
+
+# Change the order to display the hashtags 
+hto_order <- c("Doublet", "HTO1", "HTO2", "HTO3", "HTO4", "HTO5", "HTO6", "HTO7", "HTO8", "HTO9", "HTO10", "HTO13", "Negative")
+mg1.hashtag@meta.data$hash.ID <- factor(mg1.hashtag@meta.data$hash.ID, levels = hto_order)
+mg2.hashtag@meta.data$hash.ID <- factor(mg2.hashtag@meta.data$hash.ID, levels = hto_order)
+
+# Group cells based on the max HTO signal
+mg1.hashtag@meta.data$HTO_maxID <- factor(mg1.hashtag@meta.data$HTO_maxID, levels = hto_order)
+Idents(mg1.hashtag) <- "HTO_maxID"
+RidgePlot(mg1.hashtag, assay = "HTO", features = rownames(mg1.hashtag[["HTO"]])[1:12], ncol = 4)
+
+mg2.hashtag@meta.data$HTO_maxID <- factor(mg2.hashtag@meta.data$HTO_maxID, levels = hto_order)
+Idents(mg2.hashtag) <- "HTO_maxID"
+RidgePlot(mg2.hashtag, assay = "HTO", features = rownames(mg2.hashtag[["HTO"]])[1:12], ncol = 4)
+   
+```
+
+#### Visualize pairs of HTO signals to confirm mutual exclusivity in singlets
+
+```{r scatter plot}
+
+# Check a few random 
+FeatureScatter(mg1.hashtag, feature1 = "hto_HTO1", feature2 = "hto_HTO2")
+FeatureScatter(mg1.hashtag, feature1 = "hto_HTO5", feature2 = "hto_HTO7")
+FeatureScatter(mg2.hashtag, feature1 = "hto_HTO1", feature2 = "hto_HTO2")
+FeatureScatter(mg2.hashtag, feature1 = "hto_HTO5", feature2 = "hto_HTO7")
+
+```
+
+#### Compare number of UMIs for singlets, doublets and negative cells
+```{r QC of HTOs}
+
+global.order <- c("Singlet", "Doublet", "Negative")
+mg1.hashtag@meta.data$HTO_classification.global <- factor(mg1.hashtag@meta.data$HTO_classification.global, levels = global.order)
+mg2.hashtag@meta.data$HTO_classification.global <- factor(mg2.hashtag@meta.data$HTO_classification.global, levels = global.order)
+
+# Assign the droplets singlets, doublets or negative identities
+Idents(mg1.hashtag) <- "HTO_classification.global"
+Idents(mg2.hashtag) <- "HTO_classification.global"
+
+# Plot UMI counts 
+VlnPlot(mg1.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+VlnPlot(mg2.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+
+
+table(mg1.hashtag$hash.ID)
+#Doublet     HTO1     HTO2     HTO3     HTO4     HTO5     HTO6     HTO7     HTO8     HTO9    HTO10    HTO13 Negative 
+#    1556      859      409      546      817      398      786      584      457     1111     1050     1262        0 
+
+table(mg2.hashtag$hash.ID)
+#Doublet     HTO1     HTO2     HTO3     HTO4     HTO5     HTO6     HTO7     HTO8     HTO9    HTO10    HTO13 Negative 
+#    1795      871      398      540      713      475      820      600      453     1047      828     1239      137 
+    
+```
+
+
+#### Exclude HTO2 (the alternative to FBS as this condition does not fit into the experimental setup and idea and we are not interested in analysing it further for the moment)
+```{r exclude HTO2}
+
+# Remove HTO2 
+mg1.hashtag <- subset(mg1.hashtag, subset = HTO_maxID == "HTO2", invert = T)
+mg2.hashtag <- subset(mg2.hashtag, subset = HTO_maxID == "HTO2", invert = T)
+
+# Change the order to display the hashtags 
+hto_order <- c("Doublet", "HTO1", "HTO3", "HTO4", "HTO5", "HTO6", "HTO7", "HTO8", "HTO9", "HTO10", "HTO13", "Negative")
+mg1.hashtag@meta.data$hash.ID <- factor(mg1.hashtag@meta.data$hash.ID, levels = hto_order)
+mg2.hashtag@meta.data$hash.ID <- factor(mg2.hashtag@meta.data$hash.ID, levels = hto_order)
+
+# Group cells based on the max HTO signal
+mg1.hashtag@meta.data$HTO_maxID <- factor(mg1.hashtag@meta.data$HTO_maxID, levels = hto_order)
+Idents(mg1.hashtag) <- "HTO_maxID"
+rep1 <- RidgePlot(mg1.hashtag, assay = "HTO", features = rownames(mg1.hashtag[["HTO"]])[c(2:11)], ncol = 4, cols = vintage_rich_cols(10))
+
+mg2.hashtag@meta.data$HTO_maxID <- factor(mg2.hashtag@meta.data$HTO_maxID, levels = hto_order)
+Idents(mg2.hashtag) <- "HTO_maxID"
+rep2 <- RidgePlot(mg2.hashtag, assay = "HTO", features = rownames(mg2.hashtag[["HTO"]])[c(2:11)], ncol = 4, cols = vintage_rich_cols(10))
+  
+pdf("Plots/Protocol_optimization/HTOs_expression_per_replicate.pdf", height = 16, width = 15)
+rep1 / rep2
+dev.off()
+
+```
+
+#### Generate a two dimensional tSNE embedding for HTOs.Here we are grouping cells by singlets and doublets for simplicity
+```{r 2D embedding of HTOs}
+
+# First, we will remove negative cells and doubletsfrom the object
+mg1.hashtag.subset <- mg1.hashtag
+mg2.hashtag.subset <- subset(mg2.hashtag, idents = "Negative", invert = TRUE)
+
+# Calculate a tSNE embedding of the HTO data
+# For each replicate separately
+DefaultAssay(mg1.hashtag.subset) <- "HTO"
+DefaultAssay(mg2.hashtag.subset) <- "HTO"
+
+mg1.hashtag.subset <- ScaleData(mg1.hashtag.subset, features = rownames(mg1.hashtag.subset), verbose = FALSE) %>% 
+                      RunPCA(features = rownames(mg1.hashtag.subset), approx = FALSE) %>%
+                      RunTSNE(dims = 1:8, perplexity = 100, check_duplicates = FALSE)
+mg2.hashtag.subset <- ScaleData(mg2.hashtag.subset, features = rownames(mg2.hashtag.subset), verbose = FALSE) %>% 
+                      RunPCA(features = rownames(mg2.hashtag.subset), approx = FALSE) %>%
+                      RunTSNE(dims = 1:8, perplexity = 100, check_duplicates = FALSE)
+
+Idents(mg1.hashtag.subset) <- "HTO_classification.global"
+Idents(mg2.hashtag.subset) <- "HTO_classification.global"
+DimPlot(mg1.hashtag.subset) | DimPlot(mg2.hashtag.subset) 
+
+# One can also visualize the more detailed classification result by running Idents(object) <- 'HTO_classification' before plotting. 
+# Here, one can see that each of the small clouds on the tSNE plot corresponds to one of the 28 possible doublet combinations.
+Idents(mg1.hashtag.subset) <- 'hash.ID' 
+Idents(mg2.hashtag.subset) <- 'hash.ID' 
+( DimPlot(mg1.hashtag.subset, cols = c("gray",vintage_rich_cols(10))) | DimPlot(mg2.hashtag.subset, cols = c("gray",vintage_rich_cols(10))) )
+
+pdf("Plots/Protocol_optimization/umap_HTOs.pdf", width = 9, height = 5)
+( DimPlot(mg1.hashtag.subset, cols = c("gray",vintage_rich_cols(10)), pt.size = 0.4) | DimPlot(mg2.hashtag.subset, cols = c("gray",vintage_rich_cols(10)), pt.size = 0.4) )
+dev.off()
+
+png("Plots/Protocol_optimization/umap_HTOs.png", width = 4200, height = 2200, res = 480)
+( DimPlot(mg1.hashtag.subset, cols = c("gray",vintage_rich_cols(10)), pt.size = 0.4) | DimPlot(mg2.hashtag.subset, cols = c("gray",vintage_rich_cols(10)), pt.size = 0.4) )
+dev.off()
+
+```
+
+
+#### Generate a two dimensional tSNE embedding for HTOs without doublets
+```{r 2D embedding of HTOs without doublets}
+
+# First, we will remove negative cells and doublets from the object
+Idents(mg1.hashtag) <- "HTO_classification.global"
+mg1.hashtag.subset <- mg1.hashtag
+mg1.hashtag.subset <- subset(mg1.hashtag.subset, idents = "Singlet")
+Idents(mg2.hashtag) <- "HTO_classification.global"
+mg2.hashtag.subset <- subset(mg2.hashtag, idents = "Negative", invert = TRUE)
+mg2.hashtag.subset <- subset(mg2.hashtag.subset, idents = "Singlet")
+
+# Calculate a tSNE embedding of the HTO data
+# For each replicate separately
+DefaultAssay(mg1.hashtag.subset) <- "HTO"
+DefaultAssay(mg2.hashtag.subset) <- "HTO"
+
+mg1.hashtag.subset <- ScaleData(mg1.hashtag.subset, features = rownames(mg1.hashtag.subset), verbose = FALSE) %>% 
+                      RunPCA(features = rownames(mg1.hashtag.subset), approx = FALSE) %>%
+                      RunTSNE(dims = 1:8, perplexity = 100, check_duplicates = FALSE)
+mg2.hashtag.subset <- ScaleData(mg2.hashtag.subset, features = rownames(mg2.hashtag.subset), verbose = FALSE) %>% 
+                      RunPCA(features = rownames(mg2.hashtag.subset), approx = FALSE) %>%
+                      RunTSNE(dims = 1:8, perplexity = 100, check_duplicates = FALSE)
+
+# One can also visualize the more detailed classification result by running Idents(object) <- 'HTO_classification' before plotting. 
+# Here, one can see that each of the small clouds on the tSNE plot corresponds to one of the 28 possible doublet combinations.
+Idents(mg1.hashtag.subset) <- 'hash.ID' 
+Idents(mg2.hashtag.subset) <- 'hash.ID' 
+( DimPlot(mg1.hashtag.subset, cols = vintage_rich_cols(10)) | DimPlot(mg2.hashtag.subset, cols = vintage_rich_cols(10)) )
+
+pdf("Plots/Protocol_optimization/umap_HTOs_singlets.pdf", width = 9, height = 5)
+( DimPlot(mg1.hashtag.subset, cols = vintage_rich_cols(10), pt.size = 0.4) | DimPlot(mg2.hashtag.subset, cols = vintage_rich_cols(10), pt.size = 0.4) )
+dev.off()
+
+png("Plots/Protocol_optimization/umap_HTOs_singlets.png", width = 4200, height = 2200, res = 480)
+( DimPlot(mg1.hashtag.subset, cols = vintage_rich_cols(10), pt.size = 0.4) | DimPlot(mg2.hashtag.subset, cols = vintage_rich_cols(10), pt.size = 0.4) )
+dev.off()
+
+```
+
+#### Create an HTO heatmap
+```{r HTO heatmap}
+
+# To increase the efficiency of plotting, you can subsample cells using the num.cells argument
+HTOHeatmap(mg1.hashtag, assay = "HTO", ncells = 5000)
+HTOHeatmap(mg2.hashtag, assay = "HTO", ncells = 5000)
+
+```
+
+```{r save hashed objects without HTO2}
+
+saveRDS(mg1.hashtag.subset, "Objects/Protocol_optimization/seurat.mg1.hashtag_singlets.rds")
+saveRDS(mg2.hashtag.subset, "Objects/Protocol_optimization/seurat.mg2.hashtag_singlets.rds")
+
+```

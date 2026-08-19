@@ -1,0 +1,680 @@
+---
+title: "Analysis of integrates SALL1 OE iMGL"
+author: "Marina Nikolova"
+date: "2023-04-20"
+output: html_document
+---
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+```
+
+```{r load seurat object}
+
+sall1_mg <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/SALL1_overexpression/sall1_mg_exp1_integrated.rds")
+
+sall1_levels <- factor(c("CTRL", "SALL1_rep1", "SALL1_rep2"))
+sall1_mg$orig.ident <- factor(sall1_mg$orig.ident, levels = sall1_levels)
+Idents(sall1_mg) <- "orig.ident"
+# generate color palette based on vintage_cols palette
+sall1_col <-setNames(c(c("#E69000","#58B6AC", "#026D7D")), sall1_levels)
+
+```
+
+
+```{r find cluster markers of all cells}
+
+Idents(sall1_mg) <- "RNA_snn_res.0.3"
+
+table(sall1_mg$orig.ident, sall1_mg$RNA_snn_res.0.3)
+
+cl_markers <- FindAllMarkers(sall1_mg, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/SALL1_overexpression/top_cl_markers.csv")
+write.csv(top50_cl_markers, "Plots/SALL1_overexpression/top50_cl_markers.csv")
+
+```
+
+#### Plot cluster markers.
+```{r heatmap top markers by cell type, fig.height=7, fig.width=4}
+
+DefaultAssay(sall1_mg) <- "RNA"
+Idents(sall1_mg) <- "RNA_snn_res.0.3"
+
+library(gplots)
+avg_cond_cl <- sapply(levels(sall1_mg$RNA_snn_res.0.3), function(x) rowMeans(sall1_mg@assays$RNA@data[,which(sall1_mg$RNA_snn_res.0.3==x)]))
+# scale the data as 0 to 1 (instead)
+# for top 2 markers
+top_cl_markers_unique <- top5_cl_markers[!duplicated(top5_cl_markers[ , "gene"]), ]  # Delete rows
+top2_cl_markers_unique <- top_cl_markers_unique %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+mat_norm <- apply(avg_cond_cl[top2_cl_markers_unique$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top2_cl_markers_unique$gene
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/SALL1_overexpression/heatmap_scaled_top2_markers_RNA_snn_res.0.3.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# for top 10 markers
+mat_norm <- apply(avg_cond_cl[top10_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top10_cl_markers$gene
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/SALL1_overexpression/heatmap_scaled_top10_markers_RNA_snn_res.0.3.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# for top 50 markers
+mat_norm <- apply(avg_cond_cl[top50_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+col.order <- top50_cl_markers$gene
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/SALL1_overexpression/heatmap_scaled_top50_markers_RNA_snn_res.0.3.pdf", width = 5, height = 14)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+# Plot basic infromation
+
+#### Plot UMAPs colored by various measures.
+
+```{r plot integrated object}
+
+Idents(sall1_mg) <- "orig.ident"
+
+# plot all cells from all samples
+pdf("Plots/SALL1_overexpression/umap_by_sample.pdf", width = 6, height = 4)
+DimPlot(sall1_mg, group.by="orig.ident", reduction="umap_css", cols = sall1_col, pt.size = 0.5) & NoAxes()
+dev.off()
+
+png("Plots/SALL1_overexpression/umap_by_sample.png", width = 2600, height = 1900, res = 400)
+DimPlot(sall1_mg, group.by="orig.ident", reduction="umap_css", cols = sall1_col, pt.size = 0.4) & NoAxes()
+dev.off()
+
+DimPlot(sall1_mg, group.by="orig.ident", reduction="umap_css", cols = sall1_col) & NoAxes()
+
+# susbet cells from each sample
+sall1_mg_ctrl <- WhichCells(sall1_mg, idents = c("CTRL"))
+sall1_mg_1 <- WhichCells(sall1_mg, idents = c("SALL1_rep1"))
+sall1_mg_2 <- WhichCells(sall1_mg, idents = c("SALL1_rep2"))
+
+# plot each sample separately
+png("Plots/SALL1_overexpression/umap_by_sample_sep.png", width = 4800, height = 1600, res = 300)
+(DimPlot(sall1_mg, cells.highlight = sall1_mg_ctrl,  reduction="umap_css", cols.highlight = c("#E69000"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(sall1_mg, cells.highlight = sall1_mg_1,  reduction="umap_css", cols.highlight = c("#58B6AC"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(sall1_mg, cells.highlight = sall1_mg_2,  reduction="umap_css", cols.highlight = c("#026D7D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() )
+dev.off()
+
+# plot by cluster
+png("Plots/SALL1_overexpression/umap_by_cluster_res.0.3.png", width = 2400, height = 1900, res = 400)
+DimPlot(sall1_mg, reduction="umap_css",  group.by="RNA_snn_res.0.3", cols = rev(rainbow_pastel_cols(9)), pt.size = 0.5) & NoAxes()
+dev.off()
+
+pdf("Plots/SALL1_overexpression/umap_by_cluster_res.0.3.pdf", width = 6, height = 4)
+DimPlot(sall1_mg, reduction="umap_css",  group.by="RNA_snn_res.0.3", cols = rev(rainbow_pastel_cols(9)), pt.size = 0.5) & NoAxes()
+dev.off()
+
+FeaturePlot(sall1_mg, features = c("SALL1", "Hygro"), split.by = "orig.ident", order = T)
+
+```
+#### Plot cell number per sample
+```{r cell number}
+
+# create a dataset of all cells
+cells_cl <- as.data.frame(table(sall1_mg$orig.ident))
+cells_cl$Var1 <- factor(x = cells_cl$Var1, levels = sall1_levels)
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Sample"
+
+# Stacked
+pdf("Plots/SALL1_overexpression/no_cells_per_sample.pdf",  width = 12, height = 6)
+ggplot(cells_cl, aes(fill=Sample, y=Freq, x=Sample)) +
+    geom_bar( stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cell type") +
+    ylab("iMGL cell number") +
+    scale_fill_manual(values = sall1_col) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+#### Plot proportions of cells per cluster and protocol.
+```{r plot cell proportions}
+
+###### ALL CELLS ######
+DefaultAssay(sall1_mg) <- "RNA"
+
+# create a dataset of all cells
+cl_mg <- as.data.frame(table(sall1_mg$RNA_snn_res.0.3, sall1_mg$orig.ident))
+
+colnames(cl_mg)[which(names(cl_mg) == "Var1")] <- "Cluster"
+colnames(cl_mg)[which(names(cl_mg) == "Var2")] <- "Sample"
+
+# Stacked condition per cluster
+pdf("Plots/SALL1_overexpression/prop_sample_per_cluster.pdf",  width = 7, height = 7)
+ggplot(cl_mg, aes(fill=Sample, y=Freq, x=Cluster)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cluster") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values=sall1_col) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+# Stacked cluster per condition
+pdf("Plots/SALL1_overexpression/prop_cluster_per_sample.pdf",  width = 7, height = 7)
+ggplot(cl_mg, aes(fill=Cluster, y=Freq, x=Sample)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Proportion of cells") +
+    scale_fill_manual(values= rev(rainbow_pastel_cols(9))) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+
+# create a dataset
+cl_mg <- as.data.frame(table(sall1_mg$RNA_snn_res.0.3, sall1_mg$orig.ident))
+cl_mg$Var2 <- factor(x = cl_mg$Var2, levels = c("all"))
+
+colnames(cl_mg)[which(names(cl_mg) == "Var1")] <- "Cluster"
+colnames(cl_mg)[which(names(cl_mg) == "Var2")] <- "Sample"
+
+# Stacked
+pdf("Plots/SALL1_overexpression/prop_all_cells_per_cluster.pdf",  width = 6, height = 8)
+ggplot(cl_mg, aes(fill=Cluster, y=Freq, x="")) +
+    geom_bar(position="fill", stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cluster") +
+    ylab("Proportion of cells") +
+    scale_fill_manual(values = rev(rainbow_pastel_cols(9))) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+
+# create a dataset
+cl_mg <- as.data.frame(table(sall1_mg$RNA_snn_res.0.3, sall1_mg$orig.ident))
+cl_mg$Var1 <- factor(x = cl_mg$Var1, levels = c("all"))
+
+colnames(cl_mg)[which(names(cl_mg) == "Var1")] <- "Cluster"
+colnames(cl_mg)[which(names(cl_mg) == "Var2")] <- "Sample"
+
+# Stacked
+pdf("Plots/SALL1_overexpression/prop_all_cells_per_sample.pdf",  width = 6, height = 8)
+ggplot(cl_mg, aes(fill=Sample, y=Freq, x="")) +
+    geom_bar(position="fill", stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cluster") +
+    ylab("Proportion of cells") +
+    scale_fill_manual(values = sall1_col) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+
+#### Plot cluster markers
+
+```{r feature plots}
+
+genes <- c("PTPRC", "SPP1", "AIF1", "CX3CR1", "RUNX1", "SPI1", "CSF1R", "AXL", "P2RY12", "SALL1", "TREM2","TMEM119")
+homeostatic <- c("SALL1","SALL3","P2RY12","P2RY13","HEXB","SPARC","ENTPD1","ADORA3","CST3","ECSCR","TGFA","MEF2A") # From Cowan et al (2022) Cell
+dam <- c("ITGAX","CLEC7A","AXL","CD9","CD63","CCL2","APOE","TREM2","SPP1","LPL","CST7","GPNMB") # From Cowan et al (2022) Cell
+markers <- c("C3", "EGR1", # remodelling microglia
+             "CXCL5", "IL7R", # inflammatory microglia
+              "F13A1", "MRC1", # resting microglia or brain-associated microgphages
+              "APOC1", "ACP5", # lipid-associated microglia
+              "MKI67", "TOP2A", # proliferating
+              "TPM2", "ACTA2", # smooth muscle cell
+              "SOX4", "MAP1B" # neuron 
+              )
+
+###### ALL CELLS ######
+
+DefaultAssay(sall1_mg) <- "RNA"
+
+png("Plots/SALL1_overexpression/feature_plot_microglia_genes.png",  width = 6000, height = 4500, res = 500)
+FeaturePlot(sall1_mg, features = genes, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol = 4) & NoAxes() & NoLegend()
+dev.off()
+
+png("Plots/SALL1_overexpression/feature_plot_celltype_markers.png",  width = 6000, height = 6000, res = 500)
+FeaturePlot(sall1_mg, features = markers, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol=4) & NoAxes() & NoLegend()
+dev.off()
+
+png("Plots/SALL1_overexpression/feature_plot_microglia_markers_by_sample.png",  width = 4500, height = 7500, res = 500)
+FeaturePlot(sall1_mg, features = c("SALL1", "CX3CR1", "CSF1R", "TMEM119", "TREM2", "P2RY12"), cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol = 4, split.by = "orig.ident") & NoAxes() & NoLegend()
+dev.off()
+
+png("Plots/SALL1_overexpression/feature_plot_top2_markers.png",  width = 6000, height = 6000, res = 500)
+FeaturePlot(sall1_mg, features = top2_cl_markers$gene, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol = 4) & NoAxes() & NoLegend()
+dev.off()
+
+
+
+DotPlot(sall1_mg, features = genes, group.by = "orig.ident") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+
+li_markers <- c("F13A1","MRC1","DAB2", # macrophage-related marker genes, mostly YS
+                "IFNGR1","VSIR","MNDA","S100A9","LGALS1",
+                "HSPA5", "XBP1", "MANF", # response to endoplasmic reticulum stress, might play an important role in promoting neuron development
+                "TREM2", "SPP1", "CSTD", "FCGR3A","APOE","FCGR1A","ASAH1", # inflammatory characteristics, early microglia in CS12 
+                "JUN","DNAJB1","DNAJB4",
+                "HSPA1B", "HSPB1","FKBP5", # immune microglia, may be involved in the phagocytosis and removal of cell debris via inducing the production of interleukin 6 and tumor necrosis factor alpha during the development of the Cor and Cere 
+                "HLA-DRB1", "HLA-DRA" # mainly expressed in white matter microglia under normal physiological conditions or activated microglia
+                ) # Genes chosen from Li et al (Decoding the temporal and regional specification of microglia in the developing human brain. Cell Stem Cell, 2022)
+
+pdf("Plots/SALL1_overexpression/dotplot_markers_li_developing_microglia.pdf",  width = 7.8, height = 2.3)
+DotPlot(sall1_mg, features = li_markers, group.by = "orig.ident") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+DotPlot(sall1_mg, features = c("CSF1", "MCM5","CRYBB1","MAFB","CD14"), group.by = "orig.ident") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+
+```
+
+#### Plot microglia markers
+```{r}
+
+mg_genes <- c("PTPRC",  "AIF1", "CX3CR1", "RUNX1", "SPI1", "CSF1R", "AXL", "P2RY12", "SALL1", "TREM2","TMEM119", "SALL3", "P2RY13", "HEXB", "SPARC", "ENTPD1", "ADORA3", "CST3", "ECSCR", "TGFA", "MEF2A","ITGAX","CLEC7A","CD9","CD63","CCL2","APOE","SPP1","LPL","CST7","GPNMB")
+
+avg_av_cond <- sapply(levels(sall1_mg$orig.ident), function(x) rowMeans(sall1_mg@assays$RNA@data[,which(sall1_mg$orig.ident==x)]))
+hcl_cl <- hclust(as.dist(1-qlcMatrix::corSparse(avg_av_cond[VariableFeatures(sall1_mg),])), method="ward.D2")
+mat <- avg_av_cond[mg_genes,]
+pdf("Plots/SALL1_overexpression/heatmap_microglia_genes_not_scaled.pdf", height = 2, width = 8)
+heatmap.2(t(mat), Rowv=as.dendrogram(hcl_cl), trace="none", key=F, keysize=0.5, col=greyscale_colscheme(30), scale="none", margins=c(7,9), cexRow=1.3, cexCol=1)
+dev.off()
+mat_norm <- apply(avg_av_cond[mg_genes,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+pdf("Plots/SALL1_overexpression/heatmap_microglia_genes_scaled.pdf", height = 2, width = 8)
+heatmap.2(mat_norm, Rowv=as.dendrogram(hcl_cl), trace="none", key=F, keysize=0.5, col=greyscale_colscheme(30), scale="none", margins=c(7,9), cexRow=1.3, cexCol=1)
+dev.off()
+
+pdf("Plots/SALL1_overexpression/dotplot_homeostatic_genes.pdf", height = 2, width = 8)
+DotPlot(sall1_mg, features = homeostatic, group.by = "orig.ident") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/SALL1_overexpression/dotplot_dam_genes.pdf", height = 2, width = 8)
+DotPlot(sall1_mg, features = dam, group.by = "orig.ident") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/SALL1_overexpression/dotplot_homeostatic_and_dam_genes.pdf", height = 3, width = 10)
+DotPlot(sall1_mg, features = c(homeostatic,dam), group.by = "orig.ident") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+mat_norm <- apply(avg_av_cond[c(homeostatic, dam),], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+pdf("Plots/SALL1_overexpression/heatmap_homeostatic_and_dam_genes.pdf", height = 2, width = 8)
+heatmap.2(mat_norm, Rowv=as.dendrogram(hcl_cl), trace="none", key=F, keysize=0.5, col=greyscale_colscheme(30), scale="none", margins=c(7,9), cexRow=1.3, cexCol=1)
+dev.off()
+
+```
+
+
+
+# Comparison to primary microglia Kracht et al
+
+```{r load and prepare primary microglia Kracht}
+
+## logCP10k-primary vs. logUMInorm-organoid
+# load("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Kracht_Science_2020_human_fetal_microglia_scRNAseq_ATACseq/niches_avgExpr_meta.RData")
+load("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Kracht_primary_microglia/niches_microglia_only_avgExpr_meta.RData") # excluding monocytes, erythrocytes, perivascular macrophages and SOX-high microglia
+
+## Load primary fetal microglia
+seurat_MG <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Kracht_Science_2020_human_fetal_microglia_scRNAseq_ATACseq/seurat.rds")
+seurat_MG_only <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Kracht_primary_microglia/seurat_microglia_only.rds") # excluding monocytes, erythrocytes, perivascular macrophages and SOX-high microglia
+
+# Load uwot model
+umap_model <- load_uwot(file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/kracht_uwot_model_pca.uwot")
+umap_model_MG_only <- load_uwot(file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Kracht_primary_microglia/uwot_model_microglia_only_pca.uwot") # excluding monocytes, erythrocytes, perivascular macrophages and SOX-high microglia
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_primary_ct_levels <- factor(c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia", "SOX-hi microglia", "Monocyte", "Perivascular macrophage", "Erythrocyte"))
+# generate color palette based on vintage_cols palette
+col_primary_ct <-setNames(c(rev(rainbow_pastel_cols(9))), mg_primary_ct_levels)
+
+```
+
+```{r name celltypes in kracht microglia}
+
+Idents(seurat_MG) <- "celltype"
+seurat_MG$celltype  <- factor(setNames(c("Erythrocyte",
+           "Monocyte",
+           "Perivascular macrophage",
+           "SOX-hi microglia",
+           "SOX-medium microglia",
+           "Proliferating microglia",
+           "Homeostatic microglia (early)",
+           "Homeostatic microglia (late)",
+            "Activated microglia",
+           "Activated microglia"), levels(seurat_MG@active.ident))[seurat_MG@active.ident])
+
+```
+
+#### Seurat-based label transfer
+```{r Seurat-based label transfer all cells}
+
+###### ALL CELLS ######
+
+Idents(seurat_MG) <- "celltype"
+
+# Perform Seurat label transfer for projection of the reference onto the query (iPSC-dervied) microglia
+# Find anchors
+anchors <- FindTransferAnchors(reference = seurat_MG, query = sall1_mg, dims = 1:50, npcs = 50, reduction = "rpca", k.filter = NA,verbose = F)
+# Transfer the categorical information across the two datasets as predict.id
+# Seurat does not correct or modify the query expression data
+# Label transfer based on timepoint
+predictions <- TransferData(anchorset = anchors, query = sall1_mg, refdata = as.character(seurat_MG$timepoint_wks), dims = 1:50, weight.reduction = "pca") # project the PCA structure of the reference onto the query by default (this can be changed with the weight.reduction parameter). TransferData returns a matrix with predicted IDs and prediction scores, which we can add to the query metadata.
+sall1_mg$timepoint_wks_transfer <- predictions$predicted.id
+
+# Label transfer based on cell type
+predictions <- TransferData(anchorset = anchors, query = sall1_mg, refdata = as.character(seurat_MG$celltype), dims = 1:50, weight.reduction = "pca")
+sall1_mg$celltype_transfer <- predictions$predicted.id
+
+# Order metadata levels
+levels_primary_wks <- factor(c(9, 10, 11, 12, 13, 15, 16, 17, 18))
+sall1_mg$timepoint_wks_transfer <- factor(sall1_mg$timepoint_wks_transfer, levels = levels_primary_wks)
+
+# Plot the label transfer by timepoint
+pdf("Plots/SALL1_overexpression/transfer_kracht_by_week.pdf",  width = 6, height = 5)
+DimPlot(sall1_mg, group.by="timepoint_wks_transfer", reduction="umap_css", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+png("Plots/SALL1_overexpression/transfer_kracht_by_week.png",  width = 2700, height = 2600, res = 500)
+DimPlot(sall1_mg, group.by="timepoint_wks_transfer", reduction="umap_css", pt.size = 0.6, cols =  vintage_rich_cols(11)) & NoAxes()
+dev.off()
+
+
+# Plot the label transfer by cell type
+pdf("Plots/SALL1_overexpression/transfer_kracht_by_celltype.pdf",  width = 7.5, height = 5)
+DimPlot(sall1_mg, group.by="celltype_transfer", reduction="umap_css", pt.size = 0.6, cols = col_primary_ct) & NoAxes()
+dev.off()
+png("Plots/SALL1_overexpression/transfer_kracht_by_celltype.png",  width = 3700, height = 2600, res = 500)
+DimPlot(sall1_mg, group.by="celltype_transfer", reduction="umap_css", pt.size = 0.6, cols =  col_primary_ct) & NoAxes()
+dev.off()
+
+Idents(sall1_mg) <- "celltype_transfer"
+# susbet cells fro mwach sample
+am <- WhichCells(sall1_mg, idents = c("Activated microglia"))
+home <- WhichCells(sall1_mg, idents = c("Homeostatic microglia (early)"))
+homl <- WhichCells(sall1_mg, idents = c("Homeostatic microglia (late)"))
+sm <- WhichCells(sall1_mg, idents = c("SOX-medium microglia"))
+mo <- WhichCells(sall1_mg, idents = c("Monocyte"))
+pmac <- WhichCells(sall1_mg, idents = c("Perivascular macrophage"))
+prom <- WhichCells(sall1_mg, idents = c("Proliferating microglia"))
+
+# plot each sample separately
+png("Plots/SALL1_overexpression/umap_by_celltype_transfer.png", width = 5500, height = 2600, res = 400)
+(DimPlot(sall1_mg, group.by="celltype_transfer", reduction="umap_css", pt.size = 0.6, cols = col_primary_ct) & NoAxes()  & NoLegend()|
+DimPlot(sall1_mg, cells.highlight = home,  reduction="umap_css", cols.highlight = c("#9A5C6B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(sall1_mg, cells.highlight = homl,  reduction="umap_css", cols.highlight = c("#5F718B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(sall1_mg, cells.highlight = am,  reduction="umap_css", cols.highlight = c("#41867A"), cols = "lightgray", order = T) & NoAxes() & NoLegend()) / 
+(DimPlot(sall1_mg, cells.highlight = sm,  reduction="umap_css", cols.highlight = c("#ACA64D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(sall1_mg, cells.highlight = mo,  reduction="umap_css", cols.highlight = c("#DD862C"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(sall1_mg, cells.highlight = prom,  reduction="umap_css", cols.highlight = c("#5C9160"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(sall1_mg, cells.highlight = pmac,  reduction="umap_css", cols.highlight = c("#DA6835"), cols = "lightgray", order = T) & NoAxes() & NoLegend())
+dev.off()
+
+```
+
+
+#### Plot proportions of cells per condition transfered from kracht et al.
+
+```{r plot all cell proportions transfered from primary data}
+
+DefaultAssay(sall1_mg) <- "RNA"
+
+# create a dataset to check which cell type is contained in each sample
+cells_sample <- as.data.frame(table(sall1_mg$orig.ident, sall1_mg$celltype_transfer))
+cells_sample$Var1 <- factor(x = cells_sample$Var1, levels = sall1_levels)
+cells_sample$Var2 <- factor(x = cells_sample$Var2, levels = mg_primary_ct_levels)
+
+colnames(cells_sample)[which(names(cells_sample) == "Var1")] <- "Sample"
+colnames(cells_sample)[which(names(cells_sample) == "Var2")] <- "Celltype"
+
+# Stacked
+pdf("Plots/SALL1_overexpression/prop_transferred_cells_per_sample.pdf",  width = 6, height = 8)
+ggplot(cells_sample, aes(fill=Celltype, y=Freq, x=Sample)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Transferred celltype") +
+    scale_fill_manual(values= col_primary_ct) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+# create a dataset to check what proportion of each cell type is made up of which sample 
+cells_sample <- as.data.frame(table(sall1_mg$orig.ident, sall1_mg$celltype_transfer))
+cells_sample$Var1 <- factor(x = cells_sample$Var1, levels = sall1_levels)
+cells_sample$Var2 <- factor(x = cells_sample$Var2, levels = mg_primary_ct_levels)
+
+colnames(cells_sample)[which(names(cells_sample) == "Var1")] <- "Sample"
+colnames(cells_sample)[which(names(cells_sample) == "Var2")] <- "Celltype"
+
+# Stacked
+pdf("Plots/SALL1_overexpression/prop_sample_for_each_celltype.pdf",  width = 6, height = 8)
+ggplot(cells_sample, aes(fill=Sample, y=Freq, x=Celltype)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Celltype") + 
+    ylab("Sample") +
+    scale_fill_manual(values= sall1_col) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+# create a dataset
+cells_sample <- as.data.frame(table(sall1_mg$orig.ident, sall1_mg$timepoint_wks_transfer))
+cells_sample$Var1 <- factor(x = cells_sample$Var1, levels = sall1_levels)
+cells_sample$Var2 <- factor(x = cells_sample$Var2, levels = levels_primary_wks)
+
+colnames(cells_sample)[which(names(cells_sample) == "Var1")] <- "Sample"
+colnames(cells_sample)[which(names(cells_sample) == "Var2")] <- "Timepoint"
+
+# Stacked
+pdf("Plots/SALL1_overexpression/prop_transferred_timepoint_per_sample.pdf",  width = 6, height = 8)
+ggplot(cells_sample, aes(fill=Timepoint, y=Freq, x=Sample)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Transferred celltype") +
+    scale_fill_manual(values= vintage_rich_cols(11)) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+```{r similarity spectrum to reference for all cells}
+
+# Calculate Reference Similarity Spectrum (RSS), given expression of the data and expression of the meta niches of the primary fetal microglia
+sim2_MG_niches <- ref_sim_spectrum(sall1_mg@assays$RNA@data, avg_expr_niches[vargenes_niches,], scale=F)
+dimnames(sim2_MG_niches) <- list(colnames(sall1_mg), colnames(avg_expr_niches))
+
+# plot similarity to the primary microglia similarity spectrum score
+png("Plots/SALL1_overexpression/css_similarity_to_primary_umap.png", width = 2200, height = 1900, res = 400)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(sall1_mg,"umap_css"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+pdf("Plots/SALL1_overexpression/css_similarity_to_primary_umap.pdf", width = 4.5, height = 4)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(sall1_mg,"umap_css"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+# max sim 0.6273289
+# min sim  -0.03018713
+
+library("vioplot")
+# plot the similarity to primary microglia as a score as a boxplot
+idx_MG <- which(!sall1_mg@active.ident %in% as.character(6:9))
+pdf("Plots/SALL1_overexpression/css_similarity_to_primary_boxplot.pdf", width = 3, height = 4)
+par(mar=c(10,5,1,1)); boxplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], sall1_mg$orig.ident[idx_MG], list), las=2, frame=F, pch=21, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = sall1_col, outcex = 0.2)
+dev.off()
+pdf("Plots/SALL1_overexpression/css_similarity_to_primary_vlnplot.pdf", width = 3, height = 4)
+par(mar=c(10,5,1,1)); vioplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], sall1_mg$orig.ident[idx_MG], list), las=2, frame=F, pch=19, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = sall1_col)
+dev.off()
+
+avg_expr_highres <- sapply(levels(sall1_mg$RNA_snn_res.10), function(cl) rowMeans(sall1_mg@assays$RNA@data[,which(sall1_mg$RNA_snn_res.10==cl)]))
+sim2_highres <- ref_sim_spectrum(sall1_mg@assays$RNA@data, avg_expr_highres[intersect(vargenes_niches,rownames(avg_expr_highres)),], scale=F)
+summary(apply(sim2_highres,1,max)[idx_MG])
+
+#   Min.      1st Qu.     Median      Mean      3rd Qu.     Max. 
+#   0.2163    0.6741      0.7331      0.7233    0.7820      0.9428 
+ 
+```
+
+#### Save object intermediately
+```{r save intermediate object}
+
+saveRDS(sall1_mg, "Objects/SALL1_overexpression/sall1_mg_exp1_integrated.rds")
+
+```
+
+#### Add a module score for activation or homeostasis to in vitro microglia based on kracht culture
+```{r module score for all cells}
+
+top50_ct_markers_kracht <- read.csv("/home/marinani/PhD_Projects/Microglia/Microglia_article/Plots/Kracht_primary_microglia/top50_ct_markers_kracht_renamed_ct.csv")
+activated <- top50_ct_markers_kracht %>% group_by(cluster) %>%  filter(cluster == "Activated microglia")
+homeostatic_late <- top50_ct_markers_kracht %>% group_by(cluster) %>%  filter(cluster == "Homeostatic microglia (late)") %>% filter(gene != c("RNA5SP151"))
+homeostatic_early <- top50_ct_markers_kracht %>% group_by(cluster) %>%  filter(cluster == "Homeostatic microglia (early)") %>% filter(gene != c("RPL17P50")) %>% filter(gene != c("PRXL2C"))
+
+sall1_mg <- AddModuleScore(object = sall1_mg, features = activated$gene, ctrl = 50, name = 'activated') 
+sall1_mg <- AddModuleScore(object = sall1_mg, features = homeostatic_late$gene, ctrl = 50, name = 'homeostatic_late')
+sall1_mg <- AddModuleScore(object = sall1_mg, features = homeostatic_early$gene, ctrl = 50, name = 'homeostatic_early')
+
+pdf("Plots/SALL1_overexpression/dotpt_homeostatic_activated_score.pdf", width = 6, height =4)
+DotPlot(object = sall1_mg, features = c('homeostatic_late1','homeostatic_early1','activated1'), group.by = "orig.ident") + scale_colour_gradientn(colours = bluered_colscheme(8)) + RotatedAxis()
+dev.off()
+png("Plots/SALL1_overexpression/dotpt_homeostatic_activated_score.png", width = 2000, height = 1500, res = 400)
+DotPlot(object = sall1_mg, features = c('homeostatic_late1','homeostatic_early1','activated1'), group.by = "orig.ident") + scale_colour_gradientn(colours = bluered_colscheme(8)) + RotatedAxis()
+dev.off()
+
+
+png("Plots/SALL1_overexpression/featureplot_homeostatic_activated_score.png", width = 2800, height = 1300, res = 400)
+(FeaturePlot(object = sall1_mg, features = 'homeostatic_late1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) | FeaturePlot(object = sall1_mg, features = 'activated1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) ) & NoAxes()
+dev.off()
+pdf("Plots/SALL1_overexpression/featureplot_homeostatic_activated_score.pdf", width = 12, height = 6)
+(FeaturePlot(object = sall1_mg, features = 'homeostatic_late1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) | FeaturePlot(object = sall1_mg, features = 'activated1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) ) & NoAxes()
+dev.off()
+
+```
+```{r pathway activity inference in TS_BBB endothelial cells }
+
+library(decoupleR)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+library(rcartocolor)
+library(dplyr)
+
+
+net <- get_progeny(organism = 'human', top = 100)
+net
+
+# Extract the normalized log-transformed counts
+mat_sall1_mg <- as.matrix(sall1_mg@assays$RNA@data)
+
+# Run wmean
+acts <- run_wmean(mat=mat_sall1_mg, net=net, .source='source', .target='target',
+                  .mor='weight', times = 100, minsize = 5)
+acts
+
+# Extract norm_wmean and store it in pathwayswmean in data
+sall1_mg[['pathwayswmean']] <- acts %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = sall1_mg) <- "pathwayswmean"
+Idents(sall1_mg) <- "orig.ident"
+
+# Scale the data
+sall1_mg <- ScaleData(sall1_mg)
+sall1_mg@assays$pathwayswmean@data <- sall1_mg@assays$pathwayswmean@scale.data
+
+p1 <- DimPlot(sall1_mg, reduction = "umap_css", label = TRUE, pt.size = 0.5) + 
+  NoLegend() + ggtitle('Cell types')
+p2 <- (FeaturePlot(sall1_mg, features = c("Trail")) & 
+  scale_colour_gradient2(low = 'blue', mid = 'white', high = 'red')) +
+  ggtitle('Trail activity')
+p1 | p2
+
+# Extract activities from object as a long dataframe
+df <- t(as.matrix(sall1_mg@assays$pathwayswmean@data)) %>%
+  as.data.frame() %>%
+  mutate(cluster = Idents(sall1_mg)) %>%
+  pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+  group_by(cluster, source) %>%
+  dplyr::summarise(mean = mean(score))
+
+# Transform to wide matrix
+top_acts_mat <- df %>%
+  pivot_wider(id_cols = 'cluster', names_from = 'source',
+              values_from = 'mean') %>%
+  column_to_rownames('cluster') %>%
+  as.matrix()
+top_acts_mat <- top_acts_mat[,-1]
+top_acts_mat <- top_acts_mat[,-2]
+
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("#710085", "#E0E2DD","#006b02"))(palette_length)
+
+my_breaks <- c(seq(-2, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 2, length.out=floor(palette_length/2)))
+
+# Plot
+pdf("Plots/SALL1_overexpression/pathway_progeny.pdf")
+pheatmap(top_acts_mat, border_color = NA, color=my_color, breaks = my_breaks, cluster_rows = T, cluster_cols = T, scale = "column")
+dev.off()
+
+```
+
+#### EnrichR
+DE and EnrichR pathway visualization barplot generation.
+```{r DE and EnrichR}
+
+library(enrichR)
+
+Idents(sall1_mg) <- "condition"
+table(sall1_mg$condition)
+
+pdf("Plots/SALL1_overexpression/reactome_2022_sall1_ctrl.pdf",  width = 10, height = 5)
+DEenrichRPlot(object = sall1_mg, ident.1 = "CTRL", ident.2 = c("SALL1"), enrich.database = "Reactome_2022", max.genes = 50, balanced = T, retunrn.gene.list = T, logfc.threshold = 0.3, cols = c("black"))
+dev.off()
+
+pdf("Plots/SALL1_overexpression/reactome_2022_sall1_OE.pdf",  width = 10, height = 5)
+DEenrichRPlot(object = sall1_mg, ident.1 = c("SALL1"), ident.2 = c("CTRL"), enrich.database = "Reactome_2022", max.genes = 50, balanced = T, logfc.threshold = 0.3)
+dev.off()
+
+```

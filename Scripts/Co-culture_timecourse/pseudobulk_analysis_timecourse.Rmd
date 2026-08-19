@@ -1,0 +1,306 @@
+---
+title: "Psudobulk analysis co-culture time course"
+author: "Marina Nikolova"
+date: "12/11/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(tidyverse)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(Matrix)
+library(reshape2)
+library(S4Vectors)
+library(SingleCellExperiment)
+library(pheatmap)
+library(apeglm)
+library(png)
+library(DESeq2)
+library(RColorBrewer)
+library(data.table)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_cocult_levels <- factor(c("MG-d3-ctrl","MG-d15-ctrl","MG-d30-ctrl","MG-d58-ctrl", "MG-d3-cocul","MG-d15-cocul", "MG-d30-cocul","MG-d58-cocul"))
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#94D2BD","#58B6AC", "#026D7D", "#002C3D", "#D9BE6D", "#E69000", "#C73E04", "#861D21")), mg_cocult_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+my_levels <- factor(c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia", "smooth muscle cell","neuron"))
+# generate color palette based on vintage_cols palette
+col_ct <-setNames(c(rev(pastel_contrast_cols(7))), my_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_primary_ct_levels <- factor(c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia", "SOX-hi microglia", "Monocyte", "Perivascular macrophage", "Erythrocyte"))
+# generate color palette based on vintage_cols palette
+col_primary_ct <-setNames(c(rev(rainbow_pastel_cols(9))), mg_primary_ct_levels)
+
+```
+
+
+```{r load seurat objects}
+
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/microglia_d3_d15_d30_d58_integrated.rds")
+seurat$type <- "invitro"
+
+## DE to primary fetal microglia
+seurat_MG <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/Kracht_primary_microglia_seurat.rds")
+seurat_MG$type <- "primary"
+
+```
+
+Generate a SingleCellExperiment object 
+```{r generate a SingleCellExperiment object}
+
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts <- seurat@assays$RNA@counts 
+
+metadata <- seurat@meta.data
+
+# Set up metadata as desired for aggregation and DE analysis
+metadata$cluster_id <- factor(seurat@active.ident)
+
+# Create single cell experiment object
+sce <- SingleCellExperiment(assays = list(counts = counts), 
+                           colData = metadata)
+
+```
+
+Take a look at the count matrix
+```{r count matrix and metadata}
+
+# Explore the raw counts for the dataset
+
+## Check the assays present
+assays(sce)
+
+## Check the counts matrix
+dim(counts(sce))
+counts(sce)[1:6, 1:6]
+
+# Explore the cellular metadata for the dataset
+
+dim(colData(sce))
+head(colData(sce))
+
+# Add a column with cluster and condition
+sce$condition_celltype <- paste0(sce$condition, "_", sce$celltype)
+sce$condition_timepoint <- paste0(sce$condition, "_", sce$timepoint)
+sce$condition_timepoint_celltype <- paste0(sce$condition, "_", sce$timepoint, "_", sce$celltype)
+sce$condition <- factor(sce$condition, levels = c("CTRL", "COCUL"))
+sce$timepoint <- factor(sce$timepoint, levels = c("D3", "D15", "D30", "D58"))
+
+# Extract unique names of samples (= levels of sample_id factor variable)
+sample_names <- levels(colData(sce)$orig.ident)
+sample_names
+
+# Total number of samples
+length(sample_names)
+
+```
+
+```{r}
+
+# Subset metadata to include only the variables you want to aggregate across (here, we want to aggregate by condition and by timepoint)
+groups <- colData(sce)[, c("condition", "timepoint", "celltype")]
+head(groups)
+
+```
+
+Aggregate the counts to generate a matrix with count sums
+```{r generate an aggregated matrix of counts per sample}
+
+# Aggregate across cluster-sample groups
+# transposing row/columns to have cell_ids as row names matching those of groups
+aggr_counts <- aggregate.Matrix(t(counts(sce)), 
+                                groupings = groups, fun = "sum") 
+
+# Explore output matrix
+class(aggr_counts)
+dim(aggr_counts)
+aggr_counts[1:6, 1:6]
+
+# Now transpose the matrix back so we can easilty use it to do DE analysis
+# Transpose aggregated matrix to have genes as rows and samples as columns
+aggr_counts <- t(aggr_counts)
+aggr_counts[1:6, 1:6]
+
+```
+
+Generate matching metadata at the sample-level
+```{r}
+
+# Explore structure of metadata
+head(colData(sce))
+
+# Extract sample-level variables
+metadata <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(condition, timepoint, condition_timepoint, condition_timepoint_celltype)
+
+dim(metadata)
+head(metadata)
+
+# Exclude duplicated rows
+metadata <- metadata[!duplicated(metadata), ]
+
+dim(metadata)
+head(metadata)
+
+# Rename rows
+rownames(metadata) <- metadata$condition_timepoint_celltype
+head(metadata)
+
+# Check the number of cells per sample and cluster
+t <- table(colData(sce)$condition,
+           colData(sce)$timepoint)
+t
+type(t)
+
+aggr_counts[1:6, 1:6]
+head(metadata)
+
+# Check matching of matrix columns and metadata rows
+all(colnames(aggr_counts) == rownames(metadata)) 
+# They do not, so we make them match
+metadata <- metadata[match(colnames(aggr_counts), rownames(metadata)), ]
+
+
+```
+
+```{r create DESEq2 dataframe}
+
+# Create DESeq2 object        
+dds <- DESeqDataSetFromMatrix(aggr_counts, 
+                              colData = metadata, 
+                              design = ~ condition + timepoint + timepoint:condition)
+
+```
+```{r LRT}
+
+dds <- DESeq(dds, test="LRT", reduced = ~ condition + timepoint)
+resTC <- results(dds)
+resTC$symbol <- mcols(dds)$symbol
+head(resTC[order(resTC$padj),],4)
+
+```
+```{r}
+
+data <- plotCounts(dds, which.min(resTC$padj),
+                   intgroup = c("timepoint", "condition"), returnData = TRUE)
+ggplot(data, aes(x = timepoint, y = count, color = condition, group = condition)) + 
+  geom_point() + stat_smooth(se = FALSE, method = "loess") + scale_y_log10()
+
+```
+```{r}
+
+resultsNames(dds)
+
+betas <- coef(dds)
+colnames(betas)
+
+topGenes <- head(order(resTC$padj),30)
+mat <- betas[topGenes, -c(1,2)]
+thr <- 3
+mat[mat < -thr] <- -thr
+mat[mat > thr] <- thr
+
+pdf("Plots/Co-culture_timecourse/DESeq2_heatmap_DE_across_timepoints_and_interaction_terms.pdf",  width = 6, height = 8)
+pheatmap(mat, breaks=seq(from=-thr, to=thr, length=101),
+	  cluster_col=FALSE, color =bluered_colscheme(100)) 
+dev.off()
+
+```
+
+```{r}
+
+resTC <- results(dds, contrast = c("condition", "CTRL", "COCUL"))
+
+# Turn the DESeq2 results object into a tibble for use with tidyverse functions
+res_tbl <- resTC %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  arrange(padj)
+
+# Check results output
+res_tbl 
+
+```
+```{r}
+
+res30 <- results(dds, name = "conditionCOCUL.timepointD30", test = "Wald")
+res30[which.min(resTC$padj),]
+
+# Turn the DESeq2 results object into a tibble for use with tidyverse functions
+res30_tbl <- res30 %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  arrange(padj)
+
+# Check results output
+res30_tbl 
+
+# Set thresholds
+padj_cutoff <- 0.05
+
+# Subset the significant results
+sig_res <- dplyr::filter(res30_tbl) %>%
+  dplyr::arrange(padj) %>%
+  mutate(DE = abs(log2FoldChange)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(log2FoldChange)>log(1.5) & padj < 0.01, gene, NA))
+
+# Check significant genes output
+sig_res
+
+# Add to the table another column wtih outcome
+sig_res <- sig_res %>% 
+  mutate(
+    outcome = case_when(log2FoldChange > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           log2FoldChange < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(sig_res) 
+
+de_markers_cocul <- c("CNN3", "SERPINE2", "PURPL", "LARP6", "PRSS23", "IRX2", "MXRA5", "PAPPA", "MEG3", "ASCL1", "FST", "MID1", "COL11A1", "EDIL3", "KIF5C", "MPAS1", "SLC7A11", "HTRA", "CLDN1", "HSPA8", "IL32", "MOXD1", "MAP1B", "CXCL6", # up-regulated in control
+                "MMP12", "FABP4", "PRTG", "DLK1", "APCDD1", "TRDN", "DCLK1", "THSD7A", "TOX3", "NPPC", "MMP1", "NPPC", "BIRC7", "CSF3R", "CRMP1" # up-regulated in co-culture
+          )
+
+de_markers <- sig_res %>% filter(gene %in% de_markers_cocul)
+
+plot <- ggplot(sig_res, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_vline(xintercept=c(0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) +
+  ggtitle("DEGs from day 3 to day 30 in microglia-coculture vs microglia in vitro")
+
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(log2FoldChange, -log10(padj), label = gene), size = 3, max.overlaps = 70) 
+
+pdf("Plots/Co-culture_timecourse/DESeq2_volcano_DE_day30_cocul_vs_ctrl_changed_from_day3.pdf", height = 5, width = 8)
+plot 
+dev.off()
+
+```
+

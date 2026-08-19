@@ -1,0 +1,317 @@
+---
+title: "Microglia protocol comparison"
+author: "Marina Nikolova"
+date: "13/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+
+# source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+# Generate two useful color palettes
+
+col_cl <- setNames(c(c("#1F618D","#2874A6"),                                # PSC colors
+                     colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5), # mesoderm colors
+                     colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4), # mural colors
+                     colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), # endothelial colors
+                     c("#BFC9CA","#566573","#273746")),                     # other cluster colors
+					 c(0,3,                # PSC clusters
+                      4,9,10,13,2,        # mesoderm clusters
+                      7,1,8,16,           # mural cell clusters
+                      14,15,18,11,5,6,20, # endothelial cell clusters
+                      17,19,12))          # other clusters
+ 
+colors2 <- c(c("#1F618D","#2874A6"),                                # PSC colors
+                        colorRampPalette(c("#138D75","#45B39D","#73C6B6"))(5), # mesoderm colors
+                        colorRampPalette(c("#F7DC6F","#F1C40F","#B7950B"))(4), # mural colors
+                        colorRampPalette(c("#F5B7B1","#E74C3C","#B03A2E"))(7), # endothelial colors
+                        c("#BFC9CA","#566573","#273746"))
+
+vintage_cols <- colorRampPalette(c("#002C3D", "#005F73", "#0A9396", "#94D2BD", "#D9BE6D", "#EE9B00", "#CA6702", "#C94203", "#B92113","#861D21" ))
+ 
+pastel_cols <- colorRampPalette(c( "#8989AC","#9E79A3","#B66998","#CC7F96","#DC9979","#DCA95C", "#D9BE6D", "#BCB244","#8BA15B", "#709AB5"))
+
+show_col(vintage_cols(10))
+
+oi <- c("#8989AC","#9E79A3","#B66998","#CC7F96","#DC9979","#DCA95C", "#D9BE6D", "#BCB244","#8BA15B", "#709AB5")
+swatchplot(
+  "-40%" = lighten(oi, 0.4),
+  "-20%" = lighten(oi, 0.2),
+  "  0%" = oi,
+  " 20%" =  darken(oi, 0.2),
+  " 40%" =  darken(oi, 0.4),
+  off = c(0, 0)
+)
+
+```
+
+
+```{r load data, include=FALSE}
+
+bw <- CreateSeuratObject(Read10X(data.dir="Data/Protocol_comparison/Brownjohn_filtered_bc_matrix"), project = "Brownjohn")
+mq <- CreateSeuratObject(Read10X(data.dir="Data/Protocol_comparison/McQuade_filtered_bc_matrix"), project = "McQuade")
+
+# add mitochondria percentage to the metadata
+bw[["percent.mt"]] <- PercentageFeatureSet(bw, pattern = "^MT[-\\.]")
+mq[["percent.mt"]] <- PercentageFeatureSet(mq, pattern = "^MT[-\\.]")
+
+```
+
+```{r check mitochondria percentage pre-filtering}
+
+VlnPlot(bw, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0.1) | VlnPlot(mq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0.1)
+
+```
+
+```{r check QC pre-filtering, fig.width=10, fig.height=4}
+
+# check QC
+VlnPlot(bw, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0.1) | VlnPlot(mq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0.1)
+
+# add an additional colun with log10 genes per UMI
+bw$log10GenesPerUMI <- log10(bw$nFeature_RNA) / log10(bw$nCount_RNA)
+mq$log10GenesPerUMI <- log10(mq$nFeature_RNA) / log10(mq$nCount_RNA)
+
+merged_pre_filt <- merge(bw, y=mq) 
+
+# number of cells before QC
+n.cells <- merged_pre_filt@meta.data %>% 
+  	ggplot(aes(x=orig.ident, fill=orig.ident)) + 
+  	geom_bar(fill=c("#005F73", "#C94203")) +
+  	theme_classic() +
+  	theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  	ggtitle("Number of Cells before QC")
+
+# number of transcripts per cells before QC
+n.umi <- merged_pre_filt@meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nCount_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +
+  	ylab("Cell density")+
+  	geom_vline(xintercept = 1000, linetype="dashed")+
+    theme(plot.title = element_text(hjust=0.5, face="bold")) +
+    ggtitle("UMI Counts per Cell before QC")+
+    scale_color_manual(values=c("#005F73", "#C94203"))
+
+# number of genes per cell before QC
+n.gene <- merged_pre_filt@meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nFeature_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +
+  	scale_x_log10() + 
+  	geom_vline(xintercept = 500, linetype="dashed")+
+    theme(plot.title = element_text(hjust=0.5, face="bold"))+
+    ggtitle("Gene Counts per Cell before QC")+
+    scale_color_manual(values=c("#005F73", "#C94203"))
+
+n.cells | n.umi & NoLegend() | n.gene
+
+
+gene_umi_pmt <- merged_pre_filt@meta.data %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	  scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 1000, linetype="dashed") +
+  	geom_hline(yintercept = 600, linetype="dashed") +
+  	facet_wrap(~orig.ident)
+gene_umi_pmt
+
+
+complexity <- merged_pre_filt@meta.data %>%
+  	ggplot(aes(x=log10GenesPerUMI, color = orig.ident, fill=orig.ident)) +
+  	geom_density(alpha = 0.2) +
+  	theme_classic() +
+    geom_vline(xintercept = 0.8, linetype="dashed")+
+    theme(plot.title = element_text(hjust=0.5, face="bold")) +
+    ggtitle("Complexity before QC")+
+    scale_color_manual(values=c("#005F73", "#C94203"))
+complexity
+
+```
+
+```{r filter low quality droplets, fig.width=10, fig.height=4}
+
+# filter low quality droplets
+bw <- subset(bw, subset = percent.mt < 15 & percent.mt > 0.5 & nFeature_RNA < 9000)
+mq <- subset(mq, subset = percent.mt < 15 & percent.mt > 0.5 & nFeature_RNA < 9000)
+
+# generate a list of each object within the Seurat merged object
+merged <- merge(bw, y=mq) 
+
+# plot QC plots
+# number of cells after QC
+n.cells <- merged@meta.data %>% 
+  	ggplot(aes(x=orig.ident, fill=orig.ident)) + 
+  	geom_bar(fill=c("#005F73", "#C94203")) +
+  	theme_classic() +
+  	theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  	ggtitle("Number of Cells after QC")
+
+# number of transcripts per cells after QC
+n.umi <- merged@meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nCount_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +
+  	ylab("Cell density")+
+  	geom_vline(xintercept = 3800, linetype="dashed")+
+    theme(plot.title = element_text(hjust=0.5, face="bold")) +
+    ggtitle("UMI Counts per Cell after QC")+
+    scale_color_manual(values=c("#005F73", "#C94203"))
+
+# number of genes per cell after QC
+n.gene <- merged@meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nFeature_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +
+  	scale_x_log10() + 
+  	geom_vline(xintercept = 1500, linetype="dashed")+
+    theme(plot.title = element_text(hjust=0.5, face="bold"))+
+    ggtitle("Gene Counts per Cell after QC")+
+    scale_color_manual(values=c("#005F73", "#C94203"))
+
+n.cells | n.umi | n.gene
+
+
+gene_umi_pmt <- merged@meta.data %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	  scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 3800, linetype="dashed") +
+  	geom_hline(yintercept = 1500, linetype="dashed") +
+  	facet_wrap(~orig.ident)
+gene_umi_pmt
+
+
+complexity <- merged@meta.data %>%
+  	ggplot(aes(x=log10GenesPerUMI, color = orig.ident, fill=orig.ident)) +
+  	geom_density(alpha = 0.2) +
+  	theme_classic() +
+  	geom_vline(xintercept = 0.8, linetype="dashed")+
+    theme(plot.title = element_text(hjust=0.5, face="bold")) +
+    ggtitle("Complexity after QC")+
+    scale_color_manual(values=c("#005F73", "#C94203"))
+complexity
+
+
+# check QC
+VlnPlot(bw, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0.1) | VlnPlot(mq, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0.1)
+
+```
+
+
+```{r preprocess}
+
+# normalize, find variable genes, scale data and run UMAP
+bw <- NormalizeData(bw) %>% 
+        FindVariableFeatures(nfeatures = 3000) %>% 
+        ScaleData(vars.to.regress = c("nCount_RNA","percent.mt")) %>% 
+        RunPCA(npcs = 50) 
+mq <- NormalizeData(mq) %>% 
+        FindVariableFeatures(nfeatures = 3000) %>% 
+        ScaleData(vars.to.regress = c("nCount_RNA","percent.mt")) %>% 
+        RunPCA(npcs = 50) 
+
+# Add a line with sample identity - in a new column called "protocol"
+bw@meta.data$protocol <- c("Brownjohn")
+mq@meta.data$protocol <- c("McQuade")
+
+```
+
+```{r merge}
+
+merged <- merge(bw, y = mq, project ="Protocol comparison",
+                              add.cell.ids = c("Brownjohn", "McQuade"))
+
+```
+
+
+```{r regress out cell cycle from merged}
+
+# Read in the expression matrix The first row is a header row, the first column is rownames
+exp.mat <- read.table(file = "Data/cell_cycle_vignette_files/nestorawa_forcellcycle_expressionMatrix.txt", header = TRUE, 
+    as.is = TRUE, row.names = 1)
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+
+merged <- FindVariableFeatures(merged, selection.method = "vst", nfeatures = 3000)
+VariableFeatures(merged) <- setdiff(VariableFeatures(merged), unique(c(s.genes, g2m.genes)))
+
+merged <- ScaleData(merged, vars.to.regress = c("nCount_RNA","percent.mt","S.Score", "G2M.Score"))
+merged <- RunPCA(merged, npcs = 50, features = VariableFeatures(merged), nfeatures.print = 10)
+
+DimPlot(merged, reduction = "pca")
+
+```
+
+```{r CCA integration}
+
+# Now, split the object based on this characteristc:
+merged.list <- SplitObject(merged, split.by="protocol")
+bw <- merged.list[["B"]]
+mq <- merged.list[["M"]]
+
+integrated.anchors <- FindIntegrationAnchors(object.list = merged.list, dims = 1:20)
+to_integrate <- Reduce(intersect, lapply(integrated.anchors@object.list, rownames))
+integrated <- IntegrateData(anchorset = integrated.anchors, dims = 1:20, features.to.integrate = to_integrate)
+
+```
+
+```{r analyse integrated object}
+
+DefaultAssay(integrated) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+integrated <- ScaleData(integrated, verbose = TRUE, vars.to.regress = c("nCount_RNA", "percent.mt"))
+integrated <- RunPCA(integrated, npcs = 30, verbose = TRUE)
+
+# UMAP and tSNE and Clustering
+integrated <- FindNeighbors(integrated, reduction = "pca", dims = 1:20) %>% 
+      FindClusters(resolution = 0.1) %>%
+      FindClusters(resolution = 0.2) %>%
+      FindClusters(resolution = 0.3) %>%
+      FindClusters(resolution = 0.5) %>%
+      RunUMAP(reduction = "pca", dims = 1:20)
+
+DefaultAssay(integrated) <- "RNA"
+
+```
+
+```{r save integrated object}
+
+# saveRDS(integrated, "/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Protocol_comparison/integrated_obj.rds")
+
+```
+

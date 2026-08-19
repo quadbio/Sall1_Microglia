@@ -1,0 +1,226 @@
+---
+title: "Seurat analysis of HTO demultiplexed samples"
+author: "Marina Nikolova"
+date: "03/11/2022"
+output: html_document
+---
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+```
+
+#### Read in the data
+```{r reading the data}
+
+# Load the mRNA count matrices
+mg1.hashtag <- readRDS("Objects/Protocol_optimization/seurat.mg1.hashtag_singlets.rds")
+mg2.hashtag <- readRDS("Objects/Protocol_optimization/seurat.mg2.hashtag_singlets.rds")
+
+# Set the identities to the HTO ones
+Idents(mg1.hashtag) <- "hash.ID"
+Idents(mg2.hashtag) <- "hash.ID"
+
+DefaultAssay(mg1.hashtag) <- "RNA"
+DefaultAssay(mg2.hashtag) <- "RNA"
+
+```
+
+#### Add metadata for each sample where HTO[...] is substituted with a letter
+```{r substitute HTO with letter}
+
+library(stringi)
+
+condition1 <- mg1.hashtag@meta.data$HTO_maxID
+# We will perform regex in two steps because if we add "HTO1" to be replaced in the first step, it will replace with "A" also "HTO1_0" and "HTO1_3"
+condition1 <- stri_replace_all_regex(condition1,
+                                  pattern=c("HTO3", "HTO4", "HTO5", "HTO6", "HTO7", "HTO8", "HTO9", "HTO10", "HTO13"),
+                                  replacement=c("B", "C", "D","E", "F", "G","H", "I", "J"),
+                                  vectorize=FALSE)
+condition1 <- stri_replace_all_regex(condition1,
+                                  pattern=c("HTO1"),
+                                  replacement=c("A"),
+                                  vectorize=FALSE)
+mg1.hashtag[["condition"]] <- condition1
+#mg1.hashtag[["replicate"]] <- "replicate1"
+
+
+condition2 <- mg2.hashtag@meta.data$HTO_maxID
+condition2 <- stri_replace_all_regex(condition2,
+                                  pattern=c("HTO3", "HTO4", "HTO5", "HTO6", "HTO7", "HTO8", "HTO9", "HTO10", "HTO13"),
+                                  replacement=c("B", "C", "D","E", "F", "G","H", "I", "J"),
+                                  vectorize=FALSE)
+condition2 <- stri_replace_all_regex(condition2,
+                                  pattern=c("HTO1"),
+                                  replacement=c("A"),
+                                  vectorize=FALSE)
+mg2.hashtag[["condition"]] <- condition2
+#mg2.hashtag[["replicate"]] <- "replicate2"
+
+```
+
+# Quality control
+#### Merge data
+```{r merge all data}
+
+merged <- merge(mg1.hashtag, mg2.hashtag)
+merged <- NormalizeData(merged) %>%
+  PercentageFeatureSet("^MT-", col.name = "percent.mt")
+
+```
+
+
+#### QC and integration
+```{r check QC pre-filtering}
+
+# reorder the samples in the metadata to appear in the order desired by us
+cond_levels <- factor(c("A", "B", "C", "D","E", "F", "G","H", "I", "J"))
+merged$condition <- factor(merged$condition, levels = cond_levels)
+Idents(merged) <- "condition"
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#002C3D", "#03707E", "#66BCB0", "#5F6C25", "#BBA834", "#E7A624", "#CA6702", "#C33708", "#971E1C", "#A74E8D")), cond_levels)
+
+pdf("Plots/Protocol_optimization/nFeature_pre-QC.pdf", width = 7, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = col_sample)
+dev.off()
+
+pdf("Plots/Protocol_optimization/nCount_pre-QC.pdf", width = 7, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = col_sample)
+dev.off()
+
+pdf("Plots/Protocol_optimization/percent.mt_pre-QC.pdf", width = 7, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = col_sample)
+dev.off()
+
+```
+
+#### Set thresholds to filter out low quality cells or droplets
+```{r set thresholds for QC}
+
+# Number of cells before filtering
+table(merged$orig.ident)  
+# replicate1 7870
+# replicate1 7586
+
+# Filter out cells
+merged <- subset(merged, subset = nFeature_RNA > 600 & nCount_RNA > 1000 & percent.mt < 20)
+
+# Number of cells after filtering
+table(merged$orig.ident)  
+# replicate1 7750
+# replicate1 7445
+
+```
+
+#### Check QC post-filtering
+```{r check QC post-filtering}
+
+# plot
+pdf("Plots/Protocol_optimization/nFeature_post-QC.pdf", width = 7, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = col_sample)
+dev.off()
+
+pdf("Plots/Protocol_optimization/nCount_post-QC.pdf", width = 7, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = col_sample)
+dev.off()
+
+pdf("Plots/Protocol_optimization/percent.mt_post-QC.pdf", width = 7, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = col_sample)
+dev.off()
+
+```
+
+#### Cell cycle in each sample
+```{r check cell cycle phases in each sample}
+
+seurat <- NormalizeData(merged) %>%
+  FindVariableFeatures(nfeatures = 3000) %>%
+  CellCycleScoring(g2m.features = cc.genes.updated.2019$g2m.genes, s.features = cc.genes.updated.2019$s.genes)
+
+phases <- as.data.frame(table(seurat$condition, seurat$Phase))
+phases$Var1 <- factor(x = phases$Var1)
+phases$Var2 <- factor(x = phases$Var2, levels = c( "G1", "S", "G2M"))
+
+colnames(phases)[which(names(phases) == "Var1")] <- "Condition"
+colnames(phases)[which(names(phases) == "Var2")] <- "Phase"
+
+# Stacked
+pdf("Plots/Protocol_optimization/prop_cells_in_phase_per_condition.pdf",  width = 10, height = 6)
+ggplot(phases, aes(fill=Phase, y=Freq, x=Condition)) + 
+      geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cell type") + 
+    ylab("Proporion of cells in cell cycle phases") +
+    coord_flip() +
+    scale_fill_manual(values=c("#bdbdbd", "#737373",  "#252525")) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+```
+
+
+```{r integrate}
+
+blacklist <- c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(seurat), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+VariableFeatures(seurat) <- setdiff(VariableFeatures(seurat), blacklist)
+seurat <- ScaleData(seurat, vars.to.regress = c("G2M.Score","S.Score", "percent.mt", "nFeature_RNA")) %>%
+  RunPCA(npcs = 30, verbose=F) 
+
+library(simspec)
+seurat <- cluster_sim_spectrum(seurat, label_tag="orig.ident", cluster_resolution = 1)
+seurat <- RunUMAP(seurat, reduction="css", dims=1:ncol(Embeddings(seurat,"css")), reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 46)
+
+seurat <- FindNeighbors(seurat, reduction="css", dims=1:ncol(Embeddings(seurat,"css"))) %>%
+  FindClusters(resolution = 0.1) %>%
+  FindClusters(resolution = 0.2) %>%
+  FindClusters(resolution = 0.3) %>%
+  FindClusters(resolution = 0.4) %>%
+  FindClusters(resolution = 0.5) %>%
+  FindClusters(resolution = 0.6) %>%
+  FindClusters(resolution = 0.8) %>%
+  FindClusters(resolution = 10)
+
+```
+
+
+```{r save integrated object}
+
+saveRDS(seurat, "/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Protocol_optimization/seurat_integrated.rds")
+
+```
+
+# Session info
+```{r session info}
+
+sessionInfo()
+
+```
+

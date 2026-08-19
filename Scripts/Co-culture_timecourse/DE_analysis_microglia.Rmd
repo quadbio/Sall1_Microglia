@@ -1,0 +1,713 @@
+---
+title: "Microglia co-culture DE analysis"
+author: "Marina Nikolova"
+date: "26/10/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_cocult_levels <- factor(c("MG-d3-ctrl","MG-d15-ctrl","MG-d30-ctrl","MG-d58-ctrl", "MG-d3-cocul","MG-d15-cocul", "MG-d30-cocul","MG-d58-cocul"))
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#94D2BD","#58B6AC", "#026D7D", "#002C3D", "#D9BE6D", "#E69000", "#C73E04", "#861D21")), mg_cocult_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+my_levels <- factor(c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia", "smooth muscle cell","neuron"))
+# generate color palette based on vintage_cols palette
+col_ct <-setNames(c(rev(pastel_contrast_cols(7))), my_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_primary_ct_levels <- factor(c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia", "SOX-hi microglia", "Monocyte", "Perivascular macrophage", "Erythrocyte"))
+# generate color palette based on vintage_cols palette
+col_primary_ct <-setNames(c(rev(rainbow_pastel_cols(9))), mg_primary_ct_levels)
+
+```
+
+#### Load data
+```{r load data}
+
+# Kracht et al 2020 microglia
+seurat_MG <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/Kracht_primary_microglia_seurat.rds")
+
+# Microglai from coculture
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/microglia_d3_d15_d30_d58_integrated.rds")
+
+# Subset only microglia cells, like for the pseudotime analysis
+seurat_mg <- subset(seurat, subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Subset only day 30 microglia cells
+seurat_mg_d30 <- subset(seurat, subset = sample %in% c("MG-d30-cocul", "MG-d30-ctrl")) %>%
+        subset(subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Subset only day 30 cocultured microglia cells
+seurat_mg_d30_cocul <- subset(seurat_mg_d30, subset = condition %in% c("COCUL")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# subset only clear microglia cells from the kracht dataset - exclude erythrocyte, monocyte, perivascular macrophage and sox-hi microglia
+seurat_MG_only <- subset(seurat_MG, subset = celltype %in% c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000) 
+
+## logCP10k-primary vs. logUMInorm-organoid
+load("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Kracht_Science_2020_human_fetal_microglia_scRNAseq_ATACseq/niches_avgExpr_meta.RData")
+
+```
+
+
+# Differential expression analysis between conditions
+
+#### Basic DE analysis
+```{r general similarity}
+
+# General transcriptomic similarity between co-cultured vs 2D stem cell-derived microglia
+Idents(seurat_mg) <- "sample"
+
+avg_expr_sample <- sapply(sort(unique(seurat_mg$sample)), function(sample)
+rowMeans(seurat_mg@assays$RNA@data[,which(seurat_mg$sample == sample)]))
+colnames(avg_expr_sample) <- c("MG-d3-ctrl","MG-d15-ctrl","MG-d30-ctrl","MG-d58-ctrl", "MG-d3-cocul","MG-d15-cocul", "MG-d30-cocul","MG-d58-cocul")
+corr_sample <- cor(avg_expr_sample[VariableFeatures(seurat_mg),])
+corr_sample
+plot(hclust(as.dist(1-corr_sample)))
+table(seurat_mg$sample)
+
+```
+
+#### Wilcoxon test for DE
+```{r adjust wilcoxon test for 0 p-values}
+
+# wilcoxauc.default <- function(X, y, groups_use=NULL, verbose=TRUE, ...) {
+#     ## Check and possibly correct input values
+#     if (is(X, 'dgeMatrix')) X <- as.matrix(X)
+#     if (is(X, 'data.frame')) X <- as.matrix(X)
+#     # if (is(X, 'DataFrame')) X <- as.matrix(X)
+#     # if (is(X, 'data.table')) X <- as.matrix(X)
+#     if (is(X, 'dgTMatrix')) X <- as(X, 'dgCMatrix')
+#     if (is(X, 'TsparseMatrix')) X <- as(X, 'dgCMatrix')
+#     if (ncol(X) != length(y)) stop("number of columns of X does not
+#                                 match length of y")
+#     if (!is.null(groups_use)) {
+#         idx_use <- which(y %in% intersect(groups_use, y))
+#         y <- y[idx_use]
+#         X <- X[, idx_use]
+#     }
+#     
+#     
+#     y <- factor(y)
+#     idx_use <- which(!is.na(y))
+#     if (length(idx_use) < length(y)) {
+#         y <- y[idx_use]
+#         X <- X[, idx_use]
+#         if (verbose) 
+#             message('Removing NA values from labels')        
+#     }
+#     
+#     group.size <- as.numeric(table(y))
+#     if (length(group.size[group.size > 0]) < 2) {
+#         stop('Must have at least 2 groups defined.')
+#     }
+#     
+# #     features_use <- which(apply(!is.na(X), 1, all))
+# #     if (verbose & length(features_use) < nrow(X)) {
+# #         message('Removing features with NA values')
+# #     }
+# #     X <- X[features_use, ]
+#     if (is.null(row.names(X))) {
+#         row.names(X) <- paste0('Feature', seq_len(nrow(X)))
+#     }
+#     
+#     ## Compute primary statistics
+#     group.size <- as.numeric(table(y))
+#     n1n2 <- group.size * (ncol(X) - group.size)
+#     if (is(X, 'dgCMatrix')) {
+#         rank_res <- rank_matrix(Matrix::t(X))        
+#     } else {
+#         rank_res <- rank_matrix(X)
+#     }
+# 
+#     ustat <- compute_ustat(rank_res$X_ranked, y, n1n2, group.size) 
+#     auc <- t(ustat / n1n2)
+#     pvals <- compute_pval(ustat, rank_res$ties, ncol(X), n1n2) 
+#     fdr <- apply(pvals, 2, function(x) p.adjust(x, 'BH'))
+# 
+#     ### Auxiliary Statistics (AvgExpr, PctIn, LFC, etc)
+#     group_sums <- sumGroups(X, y, 1)
+#     group_nnz <- nnzeroGroups(X, y, 1)
+#     group_pct <- sweep(group_nnz, 1, as.numeric(table(y)), "/") %>% t()
+#     group_pct_out <- -group_nnz %>% 
+#         sweep(2, colSums(group_nnz) , "+") %>% 
+#         sweep(1, as.numeric(length(y) - table(y)), "/") %>% t()
+#     group_means <- sweep(group_sums, 1, as.numeric(table(y)), "/") %>% t()
+#     cs <- colSums(group_sums)
+#     gs <- as.numeric(table(y))
+#     lfc <- Reduce(cbind, lapply(seq_len(length(levels(y))), function(g) {
+#         group_means[, g] - ((cs - group_sums[g, ]) / (length(y) - gs[g]))
+#     }))
+# 
+#     res_list <- list(auc = auc, 
+#                 pval = pvals,
+#                 padj = fdr, 
+#                 padj_log = -log10(padj),
+#                 pct_in = 100 * group_pct, 
+#                 pct_out = 100 * group_pct_out,
+#                 avgExpr = group_means, 
+#                 statistic = t(ustat),
+#                 logFC = lfc)
+#     return(tidy_results(res_list, row.names(X), levels(y)))
+# }
+
+```
+
+#### Perform wicoxon test on in vitro microglia day 30
+```{r perform wicoxon test on in vitro microglia day 30}
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_mg <- wilcoxauc(seurat_mg_d30, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.5) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.5) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -log10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_mg$padj[DE_wilcoxauc_in_vitro_mg$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_mg$padj[which(DE_wilcoxauc_in_vitro_mg$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_mg <- DE_wilcoxauc_in_vitro_mg %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.5) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.5) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_mg) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_mg$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_mg$feature,blacklist)
+DE_wilcoxauc_in_vitro_mg <- DE_wilcoxauc_in_vitro_mg %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_mg)
+
+write.csv(DE_wilcoxauc_in_vitro_mg, "Plots/Co-culture_timecourse/DE_day30_cocul_vs_ctrl.csv")
+
+# plot
+pdf("Plots/Co-culture_timecourse/volcano_DE_day30_cocul_vs_ctrl.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_in_vitro_mg, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  ylim(0,330) +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+filter(DE_wilcoxauc_in_vitro_mg, outcome == "Up-regulated" & logFC > log(1.6))
+filter(DE_wilcoxauc_in_vitro_mg, outcome == "Down-regulated" & logFC < -log(1.6))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("RGS1", "ATF3", "HES1", "EEF1A1", "EGR1", "SAT1", "CCL3", "CCL4", "CCL3L1", "CCL4L2", "DUSP1", "ARL4C", "FABP5", "FGL2", "APOE", "IL1B", "HSP90B1", # upregulated
+                                                                       "CCL2", "CCL13", "MMP9", "ANXA2", "S100A10", "CYP1B1", "F13A1", "HLA-DRA", "MRC1", "FTH", "CD163",  "PLAUR", "CD74", "SMIM4", "F13A1", "ANKRD12", "VSIG4", "HCST"  # downregulated
+                                                                       )
+
+# Filter them from the data frame
+de_markers_cocul_order <- DE_wilcoxauc_in_vitro_mg %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_mg, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=factor(outcome)), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.5), log(1.5), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  ylim(0,330) +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers_cocul_order, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+  #geom_point(data = DE_wilcoxauc_in_vitro_mg %>% filter(feature %in% de_markers_cocul), color = "yellow") 
+
+# plot
+pdf("Plots/Co-culture_timecourse/volcano_DE_day30_cocul_vs_ctrl_labeled.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+
+```
+
+#### In vitro day 30 vs kracht microglia
+```{r in vitro day 30 vs kracht microglia}
+
+# check for other TFs
+# load TFs
+hs_TFs <- read.table("/home/marinani/Scripts/Databases/AnimalTFDB/AnimalTFDB_v3/Homo_sapiens_TF.tsv", sep="\t", header=T)
+hs_TF_v <- hs_TFs$Symbol
+
+# Calculate average expression for genes in the three objects (day 30 control, day 30 co-culture, kracht microglia)
+detection_rates_d30_cocul <- rowMeans(seurat_mg_d30_cocul @assays$RNA@data > 0)
+detection_rates_kracht <- rowMeans(seurat_MG_only@assays$RNA@data > 0)
+
+common_genes <- intersect(union(names(which(detection_rates_d30_cocul > 0.01)), names(which(detection_rates_kracht > 0.01))), intersect(names(detection_rates_d30_cocul),names(detection_rates_kracht)))
+common_TFs <- sort(intersect(common_genes, hs_TFs$Symbol))
+
+```
+
+#### Detection rates
+Plot detection rates and DE genes
+```{r DE detection test}
+
+# library(Matrix)
+# 
+# differential_detection_rate_test <- function(expr1, expr2, genes2test = intersect(rownames(expr1), rownames(expr2)), num_threads = 1){
+# 	require(doParallel)
+# 	expr1 <- expr1[intersect(rownames(expr1), rownames(expr2)),]
+# 	expr2 <- expr2[rownames(expr1),]
+# 	log2fc <- log2(apply(exp(expr1) - 1, 1, mean) / apply(exp(expr2) - 1, 1, mean))
+# 
+# 	expr1 <- Matrix(expr1)
+# 	bin1 <- summary(expr1)
+# 	bin1 <- sparseMatrix(i = bin1[,1], j = bin1[,2], x = 1, dims = dim(expr1), dimnames = dimnames(expr1))
+# 	expr2 <- Matrix(expr2)
+# 	bin2 <- summary(expr2)
+# 	bin2 <- sparseMatrix(i = bin2[,1], j = bin2[,2], x = 1, dims = dim(expr2), dimnames = dimnames(expr2))
+# 	
+# 	bg <- mean(apply(bin1, 2, sum) / nrow(bin1)) / mean(apply(bin2, 2, sum) / nrow(bin2))
+# 	g <- as.factor(rep(c("g1","g2"), c(ncol(bin1), ncol(bin2))))
+# 	registerDoParallel(num_threads)
+# 	res <- setNames(data.frame(log2fc = log2fc[intersect(genes2test, rownames(expr1))], foreach(gene = intersect(genes2test, rownames(expr1)), .combine = rbind) %dopar%{
+# 		b1 <- as.logical(bin1[gene,])
+# 		b2 <- as.logical(bin2[gene,])
+# 		pt1 <- sum(b1) / length(b1)
+# 		pt2 <- sum(b2) / length(b2)
+# 
+# 		y <- c(b1, b2)
+# 		m0 <- try(glm(y ~ I(ifelse(g=="g1", bg, 1)) + 0, family=binomial('identity')), silent=T)
+# 		m1 <- glm(y ~ g, family = "binomial")
+# 		p <- ifelse(sum("try-error" %in% class(m0))>0, NA, anova(m0, m1, test="Chisq")$Pr[2])
+# 		res <- c(pt1 = pt1, pt2 = pt2, p = p)
+# 		return(p)
+# 	}, row.names = intersect(genes2test, rownames(expr1))), c("log2FC", "Pt1", "Pt2", "P"))
+# 	stopImplicitCluster()
+# 
+# 	return(res)
+# }
+# 
+# 
+# g2t <- intersect(union(names(which(detection_rates_d30_cocul > 0.01)), names(which(detection_rates_kracht > 0.01))), intersect(names(detection_rates_d30_cocul),names(detection_rates_kracht)))
+# 
+# test <- differential_detection_rate_test(seurat_mg_d30_cocul@assays$RNA@data, seurat_MG_only@assays$RNA@data, genes2test = g2t, num_threads = 1)
+
+```
+
+
+```{r DESeq2}
+
+######## DESeq2 took a long tiem to compute but the results did not differ majorly from Wilcoxon
+
+library(DESeq2)
+library(scran)
+library(ggrepel)
+
+det_rate <- rowMeans(seurat_mg_d30@assays$RNA@data)
+meta <- seurat_mg_d30@meta.data %>% mutate(condition = factor(condition, levels=c("CTRL","COCUL")))
+dds <- DESeqDataSetFromMatrix(seurat_mg_d30@assays$RNA@counts[det_rate > 0.05,],
+                              colData=meta,
+                              design = ~ condition)
+sizeFactors(dds) <- calculateSumFactors(seurat_mg_d30@assays$RNA@counts[det_rate > 0.05,])
+dds <- DESeq(dds, test="LRT", reduced=~1, useT=TRUE, minmu=1e-6, minReplicatesForReplace=Inf)
+DE_deseq2_mg <- results(dds) %>% as.data.frame() %>%
+  tibble::rownames_to_column("gene") %>%
+  mutate(DE = abs(log2FoldChange)>log2(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(log2FoldChange)>log2(1.1) & padj < 0.01, gene, NA))
+
+ggplot(DE_deseq2_mg, aes(x = log2FoldChange, y = -log10(padj), col=DE, label=DEG)) +
+  geom_point() +
+  geom_text_repel(max.overlaps = 20) +
+  geom_vline(xintercept=c(-log2(1.1), log2(1.1), 0), col="#303030", linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), col="#303030", linetype="dotted") +
+  scale_color_manual(values=c("#909090", "red")) +
+  theme_minimal()
+
+```
+
+```{r GLM model}
+
+####### FAILED ########
+# 
+# # to do DE test for one gene
+# aov_DE <- function(expr, cond, covar = NULL, family = "gaussian", test = NULL){
+#   if (is.null(covar)) covar <- data.frame(X_const = 1)
+#   dat <- data.frame(y = expr,
+#                     cond = cond,
+# 		    covar)
+#   m <- glm(y ~ ., family = family, data = dat)
+#   m0 <- glm(y ~ . - cond, family = family, data = dat)
+# 
+#   if (is.null(test)){
+#     test <- "F"
+#     if (ifelse(is(family, "family"), family$family, family) %in% c("binomial","poisson"))
+#       test <- "Chisq"
+#   }
+#   aov <- anova(m, m0, test = test)
+# 
+#   res <- c(coef(m)[grep("^cond",names(coef(m)))], aov$Pr[2])
+#   names(res)[length(res)] <- "pval"
+#   return(res)
+# }
+# 
+# 
+# 
+# library(pbapply)
+# 
+# det_rate <- rowMeans(seurat_mg@assays$RNA@data)
+# DE_aov <- data.frame(t(pbsapply(which(det_rate > 0.05), function(i)
+#   aov_DE(expr = seurat_mg@assays$RNA@data[i,],
+#          cond = factor(seurat_mg$condition, levels=c("CTRL", "COCUL")),
+#          covar = data.frame(cov = log10(seurat_mg$nCount_RNA))))), row.names=NULL)
+# DE_aov$padj <- p.adjust(DE_aov$pval, method="BH")
+# DE_aov <- data.frame(gene = names(which(det_rate > 0.05)), DE_aov) %>%
+#   mutate(DE = abs(condCOCUL)>log(1.1) & padj < 0.01) %>%
+#   mutate(DEG = ifelse(abs(condCOCUL)>log(1.1) & padj < 0.01, gene, NA))
+# 
+# DE_aov_bin <- data.frame(t(pbsapply(which(det_rate > 0.05), function(i)
+#   aov_DE(expr = seurat_mg@assays$RNA@data[i,] > 0,
+#          cond = factor(seurat_mg$condition, levels=c("CTRL", "COCUL")),
+#          covar = data.frame(cov = seurat_mg$nCount_RNA),
+#          family = "binomial"))), row.names=NULL)
+# DE_aov_bin$padj <- p.adjust(DE_aov_bin$pval, method="BH")
+# DE_aov_bin <- data.frame(gene = names(which(det_rate > 0.05)), DE_aov_bin) %>%
+#   mutate(DE = padj < 0.01) %>%
+#   mutate(DEG = ifelse(padj < 0.01, gene, NA))
+# 
+# p1 <- ggplot(DE_aov, aes(x = condCOCUL, y = -log10(padj), col=DE, label=DEG)) +
+#   geom_point() +
+#   geom_text_repel(max.overlaps = 20) +
+#   geom_vline(xintercept=c(-log(1.1), log(1.1), 0), col="#303030", linetype="dotted") +
+#   geom_hline(yintercept=-log10(0.01), col="#303030", linetype="dotted") +
+#   scale_color_manual(values=c("#909090", "red")) +
+#   theme_minimal()
+# p2 <- ggplot(DE_aov_bin, aes(x = condCOCUL, y = -log10(padj), col=DE, label=DEG)) +
+#   geom_point() +
+#   geom_text_repel(max.overlaps = 20) +
+#   geom_vline(xintercept=0, col="#303030", linetype="dotted") +
+#   geom_hline(yintercept=-log10(0.01), col="#303030", linetype="dotted") +
+#   scale_color_manual(values=c("#909090", "red")) +
+#   theme_minimal()
+# 
+# p1 | p2
+
+```
+
+
+
+#### Advanced DE analysis
+
+```{r DE advanced}
+
+# all co-culture microglia, without the other cell types
+idx_invitro <- which(! seurat$celltype %in% c("Smooth muscle cell","Neuron") & seurat$condition == "COCUL")
+# subset only genes which are detected in either of the data sets
+detection_rates_invitro <- rowMeans(seurat@assays$RNA@data[,idx_invitro] > 0)
+detection_rates_invivo <- rowMeans(seurat_MG_only@assays$RNA@data > 0)
+# generate a vector with overlapping genes in vitro (co-culture) and in vivo
+shared_genes <- intersect(union(names(which(detection_rates_invitro > 0.01)), names(which(detection_rates_invivo > 0.01))), intersect(names(detection_rates_invitro),names(detection_rates_invivo)))
+# generate a common matrix which contains the shared genes as rows and cocultured cells as columns; add the primary data with shared genes as rows and all cells as columns; the result is a matrix with shared genes as rows and cells from both conditions as columns
+det_mat <- cbind(seurat@assays$RNA@data[shared_genes,idx_invitro] > 0, seurat_MG_only@assays$RNA@data[shared_genes,] > 0)
+cond <- factor(rep(c("invitro","invivo"), c(length(idx_invitro),ncol(seurat_MG_only))))
+# Generate a vector with the coverage info (.i.e number of genes or nFeature_RNA) of all cells
+coverage <- c(seurat$nFeature_RNA[idx_invitro], seurat_MG_only$nFeature_RNA)
+# Binarize the similarity values
+bincounts <- seurat@assays$RNA@data > 0
+sim2_MG_niches_bin <- ref_sim_spectrum(bincounts, avg_binexpr_niches[vargenes_niches,], scale=F)
+dimnames(sim2_MG_niches_bin) <- list(colnames(seurat), colnames(avg_binexpr_niches))
+
+ct <- factor(c(as.character(meta_niches$celltype[apply(sim2_MG_niches_bin,1,which.max)[idx_invitro]]),
+               as.character(seurat_MG_only$celltype)),
+             levels = levels(seurat_MG_only$celltype))
+
+DE_invitro_invivo <- binom_group_test(det_mat,
+                                      group = cond,
+                                      coverage = coverage,
+                                      covar = data.frame(ct = ct),
+                                      num_threads = 50,
+                                      return_coef_group = "invivo")
+saveRDS(DE_invitro_invivo, file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/res.DE-binom_cocultured_invivo_microglia.rds")
+blacklist <- c(grep("^MT-", rownames(det_mat), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+DEG_invitro_invivo <- setdiff(rownames(DE_invitro_invivo),blacklist)[which(p.adjust(DE_invitro_invivo$p_Resi[!rownames(DE_invitro_invivo) %in% blacklist]*2, method="BH")<0.05)]
+
+layout(matrix(1)); par(mar=c(5,5,1,1))
+plot(detection_rates_invitro[shared_genes],
+     detection_rates_invivo[shared_genes],
+     xlab = "Detection rate (in vitro, co-cultured)", ylab = "Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=1)
+points(detection_rates_invitro[DEG_invitro_invivo], detection_rates_invivo[DEG_invitro_invivo], col="#303030", bg="red", pch=21, cex=1.5)
+
+plot(log10(detection_rates_invitro[shared_genes_d30]),
+     log10(detection_rates_invivo[shared_genes_d30]),
+     xlab = "Log10-Detection rate (in vitro, co-cultured)", ylab = "Log10-Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=1)
+points(log10(detection_rates_invitro[DEG_invitro_invivo]), log10(detection_rates_invivo[DEG_invitro_invivo]), col="#303030", bg="red", pch=21, cex=1.5)
+
+human_TFs <- read.table("/home/marinani/Scripts/Databases/AnimalTFDB/AnimalTFDB_v3/Homo_sapiens_TF.tsv", sep="\t", header=T)
+DEG_TF_invitro_invivo <- sort(intersect(DEG_invitro_invivo, human_TFs$Symbol))
+sort(setNames(DE_invitro_invivo[DEG_TF_invitro_invivo,"coef_invivo"], DEG_TF_invitro_invivo))
+
+### only d30 co-culture microglia
+idx_invitro_d30 <- which(! seurat$celltype %in% c("Smooth muscle cell","Neuron") & seurat$condition == "COCUL" & seurat$timepoint == "D30")
+
+detection_rates_invitro_d30 <- rowMeans(seurat@assays$RNA@data[,idx_invitro_d30] > 0)
+
+shared_genes_d30 <- intersect(union(names(which(detection_rates_invitro_d30 > 0.01)), names(which(detection_rates_invivo > 0.01))), intersect(names(detection_rates_invitro_d30),names(detection_rates_invivo)))
+det_mat <- cbind(seurat@assays$RNA@data[shared_genes_d30,idx_invitro_d30] > 0, seurat_MG_only@assays$RNA@data[shared_genes_d30,] > 0)
+cond <- factor(rep(c("invitro","invivo"), c(length(idx_invitro_d30),ncol(seurat_MG_only))))
+coverage <- c(seurat$nFeature_RNA[idx_invitro_d30], seurat_MG_only$nFeature_RNA)
+ct <- factor(c(as.character(meta_niches$celltype[apply(sim2_MG_niches_bin,1,which.max)[idx_invitro_d30]]),
+               as.character(seurat_MG_only$celltype)),
+             levels = levels(seurat_MG_only$celltype))
+
+DE_invitro_d30_invivo <- binom_group_test(det_mat,
+                                          group = cond,
+                                          coverage = coverage,
+                                          covar = data.frame(ct = ct),
+                                          num_threads = 50,
+                                          return_coef_group = "invivo")
+saveRDS(DE_invitro_d30_invivo, file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/res.DE-binom_cocultured-30d_invivo_microglia.rds")
+
+blacklist <- c(grep("^MT-", rownames(det_mat), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+DEG_invitro_d30_invivo <- setdiff(rownames(DE_invitro_d30_invivo),blacklist)[which(p.adjust(DE_invitro_d30_invivo$p_Resi[!rownames(DE_invitro_d30_invivo) %in% blacklist]*2, method="BH")<0.05)]
+
+# Plot
+pdf("Plots/Co-culture_timecourse/det_rate_and_binom_group_test_DE_kracht_d30_cocul.pdf", height = 8, width = 13)
+layout(matrix(1)); par(mar=c(5,5,1,1))
+plot(detection_rates_invitro_d30[shared_genes_d30],
+     detection_rates_invivo[shared_genes_d30],
+     xlab = "Detection rate (in vitro, co-cultured 30d)", ylab = "Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=1)
+points(detection_rates_invitro_d30[DEG_invitro_d30_invivo], detection_rates_invivo[DEG_invitro_d30_invivo], col="#303030", bg="#C73E04", pch=21, cex=1.5)
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/log10_det_rate_and_binom_group_test_DE_kracht_d30_cocul.pdf", height = 8, width = 13)
+plot(log10(detection_rates_invitro_d30[shared_genes_d30]),
+     log10(detection_rates_invivo[shared_genes_d30]),
+     xlab = "Log10-Detection rate (in vitro, co-cultured 30d)", ylab = "Log10-Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=1)
+points(log10(detection_rates_invitro_d30[DEG_invitro_d30_invivo]), log10(detection_rates_invivo[DEG_invitro_d30_invivo]), col="#303030", bg="#C73E04", pch=21, cex=1.5)
+dev.off()
+
+# Extract TFs
+DEG_TF_invitro_d30_invivo <- sort(intersect(DEG_invitro_d30_invivo, human_TFs$Symbol))
+sort(setNames(DE_invitro_d30_invivo[DEG_TF_invitro_d30_invivo,"coef_invivo"], DEG_TF_invitro_d30_invivo))
+
+# Plot
+pdf("Plots/Co-culture_timecourse/log10_det_rate_and_binom_group_test_DE_kracht_d30_cocul_TFs.pdf", height = 8, width = 13)
+plot(log10(detection_rates_invitro_d30[shared_genes_d30]),
+     log10(detection_rates_invivo[shared_genes_d30]),
+     xlab = "Log10-Detection rate (in vitro, co-cultured 30d)", ylab = "Log10-Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#90909060", pch=16, cex=1)
+points(log10(detection_rates_invitro_d30[DEG_invitro_d30_invivo]), log10(detection_rates_invivo[DEG_invitro_d30_invivo]), col="#303030", bg="#C73E04", pch=21, cex=1.5)
+points(log10(detection_rates_invitro_d30[DEG_TF_invitro_d30_invivo]), log10(detection_rates_invivo[DEG_TF_invitro_d30_invivo]), col="#303030", bg="#D9BE6D", pch=21, cex=1.5)
+text(log10(detection_rates_invitro_d30[DEG_TF_invitro_d30_invivo]), log10(detection_rates_invivo[DEG_TF_invitro_d30_invivo])+0.1, cex=0.6, labels=DEG_TF_invitro_d30_invivo)
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/det_rate_and_binom_group_test_DE_kracht_d30_cocul_TFs.pdf", height = 8, width = 13)
+plot(detection_rates_invitro_d30[shared_genes_d30],
+     detection_rates_invivo[shared_genes_d30],
+     xlab = "Detection rate (in vitro, co-cultured 30d)", ylab = "Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#90909060", pch=16, cex=1)
+points(detection_rates_invitro_d30[DEG_invitro_d30_invivo], detection_rates_invivo[DEG_invitro_d30_invivo], bg=ifelse(DE_invitro_d30_invivo[DEG_invitro_d30_invivo,"coef"]>0,"#303030","#D9BE6D"), col=ifelse(DE_invitro_d30_invivo[DEG_invitro_d30_invivo,"coef"]>0, "#EC7063","#3498DB"), pch=21, cex=1.2)
+points(detection_rates_invitro_d30[DEG_TF_invitro_d30_invivo], detection_rates_invivo[DEG_TF_invitro_d30_invivo], col="#303030", bg="#D9BE6D", pch=21, cex=1.5)
+text(detection_rates_invitro_d30[DEG_TF_invitro_d30_invivo], detection_rates_invivo[DEG_TF_invitro_d30_invivo]+0.1, cex=0.6, labels=DEG_TF_invitro_d30_invivo)
+dev.off()
+
+
+
+# Make a data frame with the interesexcted genes without RP genes (blacklist)
+DE_invitro_d30_invivo_intersected <- DE_invitro_d30_invivo %>% filter(rownames(DE_invitro_d30_invivo) %in% DEG_invitro_d30_invivo)
+write.csv(DE_invitro_d30_invivo_intersected, "Plots/Co-culture_timecourse/DE_invitro_d30_invivo_intersected.csv")
+
+genes_to_plot <- c("CAMK2N2", "P2RY2", "GPR146", "SH3BGR","BHLHB9", "CD68", "FTH1", "ITGB7", "SNAI1", "C1QL1", "ICAM5", "SELENOP", "MIF", "MAZ", "CYB5D1", "KRT18", "MMP9", "CLEC5A", "CXCL2", "CXCL3", "ENO2", "MMP12", "ATF3","ADAM8",# genes up in invitro microglia
+                  "KCNG4", "NACA2", "LRAT", "POTEI", "SLX1B", "DIABLO", "GREM1", "FMO1", "SIGLEC6", "SMIM11B", "SLC15A1", "COL6A3", "SLC22A13", "IDO2", "CD5L", "FMO1", "CACNA1A", "SIGLEC8", "SIGLEC6", "CDH7", "RAB6D", "RGPD3", "HAND2-AS1", "SPDYE5", "MED12L","FP671120.4", "NPIPB12"   # genes up in primary kracht microglia
+                   )
+
+# Plot
+pdf("Plots/Co-culture_timecourse/det_rate_and_binom_group_test_DE_kracht_d30_cocul_random_top_DE.pdf", height = 8, width = 9.5)
+plot(log10(detection_rates_invitro_d30[shared_genes_d30]),
+     log10(detection_rates_invivo[shared_genes_d30]),
+     xlab = "Log10-Detection rate (in vitro, co-cultured 30d)", ylab = "Log10-Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=1)
+points(log10(detection_rates_invitro_d30[DEG_invitro_d30_invivo]), log10(detection_rates_invivo[DEG_invitro_d30_invivo]), col="#303030", bg="#C73E04", pch=21, cex=1.5)
+points(log10(detection_rates_invitro_d30[genes_to_plot]), log10(detection_rates_invivo[genes_to_plot]), col="#303030", bg="#D9BE6D", pch=21, cex=1.5)
+text(log10(detection_rates_invitro_d30[genes_to_plot]), log10(detection_rates_invivo[genes_to_plot])+0.1, cex=0.6, labels=genes_to_plot)
+dev.off()
+
+```
+
+#### GO of genes higher in vivo
+```{r enrichr of high in vivo genes}
+
+DE_invitro_d30_invivo_positive <- DE_invitro_d30_invivo %>% filter(DE_invitro_d30_invivo$coef_invivo > 0 )
+DEG_invitro_d30_invivo_positive <- setdiff(rownames(DE_invitro_d30_invivo_positive),blacklist)[which(p.adjust(DE_invitro_d30_invivo_positive$p_Resi[!rownames(DE_invitro_d30_invivo_positive) %in% blacklist]*2, method="BH")<0.05)]
+
+# Extract TFs
+DEG_TF_invitro_d30_invivo_positive <- sort(intersect(DEG_invitro_d30_invivo_positive, human_TFs$Symbol))
+DEG_TF_invitro_d30_invivo_positive_top <- sort(setNames(DE_invitro_d30_invivo_positive[DEG_TF_invitro_d30_invivo_positive,"coef_invivo"], DEG_TF_invitro_d30_invivo_positive))
+
+library(enrichR)
+databases <- listEnrichrDbs()
+databases <- databases[order(databases$libraryName),]
+databases$libraryName
+
+# Generate a vector with the databases of choice
+dbs <- c("Reactome_2022", "KEGG_2021_Human", "Panther_2016")
+
+DEG_invitro_d30_invivo_positive_enriched <- enrichr(DEG_invitro_d30_invivo_positive, dbs)
+
+pdf("Plots/Co-culture_timecourse/DEG_invitro_d30_invivo_GO_positive_enriched.pdf", height = 5, width = 16) 
+plotEnrich(DEG_invitro_d30_invivo_positive_enriched[[1]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = paste("Reactome_2022 enriched")) + 
+    scale_fill_gradientn(colours = rev(red_gray(8))) + 
+    theme_classic() |
+plotEnrich(DEG_invitro_d30_invivo_positive_enriched[[2]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "KEGG_2021_Human enriched") + 
+    scale_fill_gradientn(colours = rev(red_gray(8))) + 
+    theme_classic() |
+plotEnrich(DEG_invitro_d30_invivo_positive_enriched[[3]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "Panther_2016 enriched") + 
+    scale_fill_gradientn(colours = rev(red_gray(8))) + 
+    theme_classic() 
+dev.off()
+  
+```
+
+
+```{r}
+
+#### check specifically the microglia core TFs and regulators
+genes <- c("RUNX1","SPI1","SALL1","MAFB","MEF2A","MEF2C","IRF8","TGFB1","CSF1","TNF","CSF2")
+plot(log10(detection_rates_invitro_d30[shared_genes_d30]),
+     log10(detection_rates_invivo[shared_genes_d30]),
+     xlab = "Log10-Detection rate (in vitro, co-cultured 30d)", ylab = "Log10-Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=0.6)
+points(log10(detection_rates_invitro_d30[DEG_invitro_d30_invivo]), log10(detection_rates_invivo[DEG_invitro_d30_invivo]), bg=ifelse(DE_invitro_d30_invivo[DEG_invitro_d30_invivo,"coef"]>0,"#EC7063","#85C1E9"), col=ifelse(DE_invitro_d30_invivo[DEG_invitro_d30_invivo,"coef"]>0, "#EC7063","#3498DB"), pch=21, cex=0.8)
+points(log10(detection_rates_invitro_d30[genes]), log10(detection_rates_invivo[genes]), col="#303030", bg=ifelse(genes %in% DEG_invitro_d30_invivo, ifelse(DE_invitro_d30_invivo[genes,"coef"]>0,"#EC7063","#85C1E9"), "#F9E79F"), pch=21, cex=2)
+text(log10(detection_rates_invitro_d30[genes]), log10(detection_rates_invivo[genes])+0.12, labels=genes, cex=1, font=2)
+
+```
+
+```{r no coculture microglia}
+
+### no-coculture microglia
+idx_nocult <- which(! seurat$celltype %in% c("Smooth muscle cell","Neuron") & seurat$condition == "CTRL")
+detection_rates_nocult <- rowMeans(seurat@assays$RNA@data[,idx_nocult] > 0)
+
+shared_genes_nocult <- intersect(union(names(which(detection_rates_nocult > 0.01)), names(which(detection_rates_invivo > 0.01))), intersect(names(detection_rates_nocult),names(detection_rates_invivo)))
+det_mat <- cbind(seurat@assays$RNA@data[shared_genes_nocult,idx_nocult] > 0, seurat_MG_only@assays$RNA@data[shared_genes_nocult,] > 0)
+cond <- factor(rep(c("invitro","invivo"), c(length(idx_nocult),ncol(seurat_MG_only))))
+coverage <- c(seurat$nFeature_RNA[idx_nocult], seurat_MG_only$nFeature_RNA)
+ct <- factor(c(as.character(meta_niches$celltype[apply(sim2_MG_niches_bin,1,which.max)[idx_nocult]]),
+               as.character(seurat_MG_only$celltype)),
+             levels = levels(seurat_MG_only$celltype))
+
+DE_nocult_invivo <- binom_group_test(det_mat,
+                                     group = cond,
+                                     coverage = coverage,
+                                     covar = data.frame(ct = ct),
+                                     num_threads = 50,
+                                     return_coef_group = "invivo")
+saveRDS(DE_nocult_invivo, file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/res.DE-binom_nococulture_invivo_microglia.rds")
+DEG_nocult_invivo <- setdiff(rownames(DE_nocult_invivo),blacklist)[which(p.adjust(DE_nocult_invivo$p_Resi[!rownames(DE_nocult_invivo) %in% blacklist]*2, method="BH")<0.05)]
+
+layout(matrix(1)); par(mar=c(5,5,1,1))
+plot(log10(detection_rates_nocult[shared_genes_nocult]),
+     log10(detection_rates_invivo[shared_genes_nocult]),
+     xlab = "Log10-Detection rate (in vitro, no co-culture)", ylab = "Log10-Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=1)
+points(log10(detection_rates_nocult[DEG_nocult_invivo]), log10(detection_rates_invivo[DEG_nocult_invivo]), col="#303030", bg="red", pch=21, cex=1.5)
+
+human_TFs <- read.table("~/Work/databases/animalTFDB/animalTFDB_v3/Homo_sapiens_TF.tsv", sep="\t", header=T)
+DEG_TF_nocult_invivo <- sort(intersect(DEG_nocult_invivo, human_TFs$Symbol))
+sort(setNames(DE_invitro_invivo[DEG_TF_nocult_invivo,"coef"], DEG_TF_nocult_invivo))
+
+#### check specifically the microglia core TFs and regulators
+genes <- c("RUNX1","SPI1","SALL1","MAFB","MEF2A","MEF2C","IRF8","TGFB1","CSF1","TNF","CSF2")
+plot(log10(detection_rates_nocult[shared_genes_nocult]),
+     log10(detection_rates_invivo[shared_genes_nocult]),
+     xlab = "Log10-Detection rate (in vitro, no co-culture)", ylab = "Log10-Detection rate (in vivo)", cex.lab = 1.5, bty = "n", col = "#69696960", pch=16, cex=0.6)
+points(log10(detection_rates_nocult[DEG_nocult_invivo]), log10(detection_rates_invivo[DEG_nocult_invivo]), bg=ifelse(DE_nocult_invivo[DEG_nocult_invivo,"coef"]>0,"#EC7063","#85C1E9"), col=ifelse(DE_nocult_invivo[DEG_nocult_invivo,"coef"]>0, "#EC7063","#3498DB"), pch=21, cex=0.8)
+points(log10(detection_rates_nocult[genes]), log10(detection_rates_invivo[genes]), col="#303030", bg=ifelse(genes %in% DEG_nocult_invivo, ifelse(DE_nocult_invivo[genes,"coef"]>0,"#EC7063","#85C1E9"), "#F9E79F"), pch=21, cex=2)
+text(log10(detection_rates_nocult[genes]), log10(detection_rates_invivo[genes])+0.12, labels=genes, cex=1, font=2)
+
+#### compare with co-cultured microglia
+table(sign(DE_nocult_invivo[intersect(rownames(DE_nocult_invivo),rownames(DE_invitro_d30_invivo)),"coef"]),
+      sign(DE_invitro_d30_invivo[intersect(rownames(DE_nocult_invivo),rownames(DE_invitro_d30_invivo)),"coef"]))
+table(sign(DE_nocult_invivo[intersect(DEG_nocult_invivo,rownames(DE_invitro_d30_invivo)),"coef"]),
+      sign(DE_invitro_d30_invivo[intersect(DEG_nocult_invivo,rownames(DE_invitro_d30_invivo)),"coef"]))
+
+all_shared_genes <- intersect(rownames(DE_nocult_invivo), intersect(rownames(DE_invitro_d30_invivo),rownames(DE_invitro_invivo)))
+par(mar=c(5,5,1,1))
+plot(DE_nocult_invivo[all_shared_genes,"coef"],
+     DE_invitro_d30_invivo[all_shared_genes,"coef"],
+     cex = 0.8, pch=16, col="#90909060", bty="n",
+     xlab="Effect size (No coculture vs. in vivo)", ylab="Effect size (co-cultured 30d vs. in vivo)", cex.lab=1.2)
+abline(h=0,v=0,lty=2, col="#636363")
+points(DE_nocult_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"],
+       DE_invitro_d30_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"],
+       cex=1.2, pch=21, col="#303030", bg="red", lwd=0.3)
+points(DE_nocult_invivo[intersect(setdiff(DEG_nocult_invivo,DEG_invitro_d30_invivo),all_shared_genes),"coef"],
+       DE_invitro_d30_invivo[intersect(setdiff(DEG_nocult_invivo,DEG_invitro_d30_invivo),all_shared_genes),"coef"],
+       cex=1.2, pch=21, col="#303030", bg="#F1948A", lwd=0.3)
+lines(c(-30,30),c(-30,30), lty=3, col="#636363", lwd=2)
+
+par(mar=c(8,5,1,1))
+boxplot(list(abs(DE_nocult_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"])-abs(DE_invitro_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"]),
+             abs(DE_nocult_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"])-abs(DE_invitro_d30_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"]),
+	     abs(DE_invitro_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"])-abs(DE_invitro_d30_invivo[intersect(DEG_nocult_invivo,all_shared_genes),"coef"])),
+	names = c("No vs. Co-all","No vs. Co-30d","Co-all vs. Co-30d"), cex.axis = 1,
+        ylab="DEG effect size changes", cex.lab = 1.5, xlab=NA, frame=F, pch=16, las=2)
+abline(h=0, lty=2, col="#909090")
+
+```
+
+```{r}
+# coculture-duration-related expression changes
+idx_invitro <- which(! seurat$celltype %in% c("Smooth muscle cell","Neuron") & seurat$condition == "COCUL")
+detection_rates_invitro <- rowMeans(seurat@assays$RNA@data[,idx_invitro] > 0)
+gene_cands <- names(which(detection_rates_invitro>0))
+
+DE_cocul_duration <- ancova_group_test(expr = seurat@assays$RNA@data[gene_cands,idx_invitro],
+                                       group = as.numeric(gsub("D","",seurat$timepoint[idx_invitro])),
+                                       covar = data.frame(coverage = log(seurat$nCount_RNA[idx_invitro]), ct=seurat$celltype[idx_invitro],row.names=colnames(seurat)[idx_invitro]),
+                                       num_threads = 50)
+DE_cocul_duration_noct <- ancova_group_test(expr = seurat@assays$RNA@data[gene_cands,idx_invitro],
+                                            group = as.numeric(gsub("D","",seurat$timepoint[idx_invitro])),
+                                            covar = data.frame(coverage = log(seurat$nCount_RNA[idx_invitro]), row.names=colnames(seurat)[idx_invitro]),
+                                            num_threads = 50)
+DEG_cocult <- setdiff(rownames(DE_cocul_duration_noct)[which(p.adjust(DE_cocul_duration_noct$p_ANOVA, method="bonferroni")<0.01)], blacklist)
+
+```
+

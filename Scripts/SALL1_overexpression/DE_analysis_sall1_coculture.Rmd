@@ -1,0 +1,106 @@
+---
+title: "DE SALL1 OE"
+author: "Marina Nikolova"
+date: "2024-06-23"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/SALL1_Overexpression/SALL1_OE_exp3_coculture/Analysis")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(presto)
+library(enrichR)
+library(DElegate)
+library(rrvgo)
+library(treemap)
+library(dplyr)
+library(ggplot2)
+library(gplots)
+library(ggrepel)
+library(simspec)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+```
+
+
+```{r load seurat object}
+
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/SALL1_Overexpression/SALL1_OE_exp3_coculture/Analysis/Objects/sall1_mg_exp3_cocul_integrated.rds")
+
+sall1_levels <- factor(c("GFP_MG_COCUL_D15", "GFP_MG_COCUL_D29", "SALL1_MG_COCUL_D15", "SALL1_MG_COCUL_D29"))
+seurat_clean$orig.ident <- factor(seurat_clean$orig.ident, levels = sall1_levels)
+Idents(seurat_clean) <- "orig.ident"
+
+# generate color palette based on vintage_cols palette
+sall1_col <-setNames(c(c("#E69000", "#d64b0f", "#99cfc9","#026D7D")), sall1_levels)
+
+```
+
+
+#### DE between SALL1 OE and wt
+
+```{r wilcoxauc DE SALL to ctrl per cluster, min cell number}
+
+protein_coding <- scan('/links/groups/treutlein/USERS/nazbukina/General/protein-coding_gene.txt', character(), quote = "")
+seurat_clean_prot <- subset(seurat_clean, features=as.vector(protein_coding))
+DefaultAssay(object = seurat_clean_prot) <- "RNA"
+seurat_clean_prot <- DietSeurat(seurat_clean_prot, counts=T, data=T, assays='RNA')
+seurat_clean_prot@meta.data$barcode <- seurat_clean_prot@assays[["RNA"]]@data@Dimnames[[2]]
+ClusterList <- SplitObject(seurat_clean_prot, split.by = 'celltype')
+
+
+presto_fun<-function(condition, seurat_array){
+  wilcoxauc(seurat_array, group_by='condition', groups_use=c(condition, 'control'))
+}
+
+
+deg_info <- purrr::map_dfr(ClusterList, function(x){
+    
+    x <- NormalizeData(x)
+    
+    cond_list<-c("control", "OE")
+    nsample = min(table(x@meta.data[["condition"]])) #sample to minimum
+    set.seed(1)
+    bigsampled<-c()
+    samplingdf=as.data.frame(x@meta.data[['condition']], x@assays[["RNA"]]@data@Dimnames[[2]])
+    colnames(samplingdf) = c('condition')
+    samplingdf['barcode'] <- rownames(samplingdf)
+    
+    for (treatment in cond_list){
+      #print(organoid)
+      tosample = samplingdf[samplingdf$condition==treatment,]
+      sampled <- sample(tosample$barcode, nsample)
+      bigsampled<- c(bigsampled, sampled)
+      
+   
+}
+    x<-subset(x, subset = barcode %in% bigsampled )
+
+    out <- do.call("rbind", lapply(c("OE"), presto_fun,seurat_array=x))
+    out$cell_type = rep(unique(x$celltype), dim(out)[1])
+    out$ncells<-rep(nsample, dim(out)[1])
+    out
+})
+
+deg_info <- deg_info %>%
+  filter(group == "OE") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.1) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA)) %>% 
+  mutate(outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Enriched",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Depleted",
+                           TRUE ~ "Unchanged"))
+deg_info
+
+```

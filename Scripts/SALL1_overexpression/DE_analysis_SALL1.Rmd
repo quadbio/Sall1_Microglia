@@ -1,0 +1,180 @@
+---
+title: "DE analysis control vs SALL1 OE"
+author: "Marina Nikolova"
+date: "2023-04-21"
+output: html_document
+---
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+library(plyr)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+```
+
+```{r load seurat object}
+
+sall1_mg <- readRDS("Objects/SALL1_overexpression/sall1_mg_exp1_integrated.rds")
+
+sall1_levels <- factor(c("CTRL", "SALL1_rep1", "SALL1_rep2"))
+sall1_mg$orig.ident <- factor(sall1_mg$orig.ident, levels = sall1_levels)
+Idents(sall1_mg) <- "orig.ident"
+# generate color palette based on vintage_cols palette
+sall1_col <-setNames(c(c("#E69000","#58B6AC", "#026D7D")), sall1_levels)
+
+sall1_mg$condition <- sall1_mg$orig.ident
+sall1_mg$condition <- revalue(sall1_mg$condition, c("SALL1_rep1"="SALL1"))
+sall1_mg$condition <- revalue(sall1_mg$condition, c("SALL1_rep2"="SALL1"))
+
+```
+
+# Differential expression analysis between conditions
+
+#### Basic DE analysis
+```{r general similarity}
+
+# General transcriptomic similarity between CTRL vs SALL1 OE in all cells
+Idents(sall1_mg) <- "orig.ident"
+avg_expr_sample <- sapply(sort(unique(sall1_mg$orig.ident)), function(sample)
+rowMeans(sall1_mg@assays$RNA@data[,which(sall1_mg$orig.ident == sample)]))
+colnames(avg_expr_sample) <- c("CTRL", "SALL1_rep1", "SALL1_rep2")
+corr_sample <- cor(avg_expr_sample[VariableFeatures(sall1_mg),])
+corr_sample
+plot(hclust(as.dist(1-corr_sample)))
+table(sall1_mg$orig.ident)
+
+```
+
+#### Perform wicoxon test on all cells
+```{r wicoxon test on all cells}
+
+# Run wilcoxon test
+DE_wilcoxauc_all_cells <- wilcoxauc(sall1_mg, group_by = "condition") %>%
+  filter(group == "SALL1") %>%
+  mutate(DE = abs(logFC)>log(1.2) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.2) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -log10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_all_cells$padj[DE_wilcoxauc_all_cells$padj == 0.000000e+00] <- min(DE_wilcoxauc_all_cells$padj[which(DE_wilcoxauc_all_cells$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_all_cells <- DE_wilcoxauc_all_cells %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.2) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.2) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_all_cells) 
+
+# Remove mitochondria and ribosomal protein coding genes from the DE genes
+blacklist <- c(grep("^MT-", DE_wilcoxauc_all_cells$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_all_cells$feature,blacklist)
+DE_wilcoxauc_all_cells <- DE_wilcoxauc_all_cells %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_all_cells)
+
+write.csv(DE_wilcoxauc_all_cells, "Plots/SALL1_overexpression/DE_SALL1_OE_vs_ctrl.csv")
+
+
+de_genes_all_cells <- DE_wilcoxauc_all_cells %>% filter(outcome != "Unchanged")
+
+# plot
+pdf("Plots/SALL1_overexpression/volcano_DE_SALL1_vs_CTRL_OE.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_all_cells, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_label_repel(data = de_genes_all_cells, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 20) +
+  geom_vline(xintercept=c(-log(1.2), log(1.2), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(1), linetype="dotted") +
+  ylim(0,330) +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+```
+
+```{r find common DEGs between SALL1 OE and coculture}
+
+DE_wilcoxauc_in_vitro_mg <- read.csv(DE_wilcoxauc_in_vitro_mg, "Plots/Co-culture_timecourse/DE_day30_cocul_vs_ctrl.csv")
+
+up_genes_sall1 <- DE_wilcoxauc_all_cells %>% filter(outcome == "Up-regulated")
+down_genes_sall1 <- DE_wilcoxauc_all_cells %>% filter(outcome == "Down-regulated")
+up_genes_cocult <- DE_wilcoxauc_in_vitro_mg %>% filter(outcome == "Up-regulated")
+down_genes_cocult <- DE_wilcoxauc_in_vitro_mg %>% filter(outcome == "Down-regulated")
+
+# common_up <- intersect(up_genes_sall1$feature, up_genes_cocult$feature)
+# common_down <- intersect(down_genes_sall1$feature, down_genes_cocult$feature)
+# up_sall1_down_cocult <- intersect(up_genes_sall1$feature, down_genes_cocult$feature)
+# down_sall1_up_cocult <- intersect(down_genes_sall1$feature, up_genes_cocult$feature)
+
+# Load library
+library(VennDiagram)
+ 
+# Chart
+venn.diagram(
+  x = list(up_genes_sall1$feature, down_genes_sall1$feature, up_genes_cocult$feature, down_genes_cocult$feature),
+  category.names = c("up_genes_sall1" , "down_genes_sall1", "up_genes_cocult ", "down_genes_cocult"),
+  filename = '#14_venn_diagramm.png',
+  output=TRUE
+)
+
+```
+
+
+
+```{r KEGG}
+
+library(clusterProfiler)
+library(enrichplot)
+library("org.Hs.eg.db")
+library("AnnotationDbi")
+library(ReactomePA)
+
+DE_wilcoxauc_up <- DE_wilcoxauc_all_cells %>% filter(outcome == "Up-regulated")
+DE_wilcoxauc_up$entrez_id <- mapIds(org.Hs.eg.db,
+                    keys=DE_wilcoxauc_up$feature,
+                    column="ENTREZID",
+                    keytype="SYMBOL",
+                    multiVals="first")
+
+fm_path_enrich_up <- compareCluster(entrez_id~outcome, data=DE_wilcoxauc_up, fun = enrichKEGG, organism="hsa")
+pdf("Plots/SALL1_overexpression/KEGG_enrichment_up.pdf", width = 4, height = 5)
+enrichplot::dotplot(fm_path_enrich_up, showCategory = 6) +
+  ggtitle('Pathway enrichment') + 
+  scale_colour_gradientn(colours = rev(bluewhitered_colscheme(30))) + 
+  RotatedAxis() +
+  theme_classic()
+dev.off()
+
+write.csv(fm_path_enrich_up@compareClusterResult, "Plots/KEGG_path_enrich_up.csv")
+
+```

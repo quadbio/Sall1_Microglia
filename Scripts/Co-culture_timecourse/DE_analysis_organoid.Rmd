@@ -1,0 +1,1191 @@
+---
+title: "DE analysis organoid from co-culture"
+author: "Marina Nikolova"
+date: "02/11/2022"
+output: html_document
+---
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+
+# reorder the samples in the metadata to appear in the order desired by us
+org_cocult_levels <- factor(c("ORG-d3-ctrl","ORG-d15-ctrl","ORG-d30-ctrl","ORG-d58-ctrl", "ORG-d3-cocul","ORG-d15-cocul", "ORG-d30-cocul","ORG-d58-cocul"))
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#94D2BD","#58B6AC", "#026D7D", "#002C3D", "#D9BE6D", "#E69000", "#C73E04", "#861D21")), org_cocult_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+my_levels <- factor(c("Rhombencephalon neural progenitor", "Rhombencephalon neuron", "Proliferating neuron", "Telencephalon neuron", "Telencephalon neural progenitor", "Interneuron", "Immature choroid plexus",  "Choroid plexus", "Choroid plexus stroma", "Retina progenitor", "Retina"))
+# generate color palette based on vintage_cols palette
+col_ct <-setNames(c("#9A5C6B", "#75697E", "#54768D", "#45837E", "#428D6E", "#8C9D51", "#CDAF49", "#E5AB3D", "#E0942E", "#DA7032", "#DD4345"), my_levels)
+
+```
+
+#### Load data
+```{r load data}
+
+# Organoid from coculture
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/organoid_d3_d15_d30_d58_integrated.rds")
+
+# Subset only day 30 organoid cells
+seurat_org_d30 <- subset(seurat, subset = sample %in% c("ORG-d30-cocul", "ORG-d30-ctrl")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Subset only day 58 organoid cells
+seurat_org_d58 <- subset(seurat, subset = sample %in% c("ORG-d58-cocul", "ORG-d58-ctrl")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+```
+
+# Differential expression analysis between conditions
+
+#### Basic DE analysis
+```{r general similarity}
+
+# General transcriptomic similarity between co-cultured vs 2D stem cell-derived microglia
+Idents(seurat) <- "sample"
+
+avg_expr_sample <- sapply(sort(unique(seurat$sample)), function(sample)
+rowMeans(seurat@assays$RNA@data[,which(seurat$sample == sample)]))
+colnames(avg_expr_sample) <- c("ORG-d3-ctrl","ORG-d15-ctrl","ORG-d30-ctrl","ORG-d58-ctrl", "ORG-d3-cocul","ORG-d15-cocul", "ORG-d30-cocul","ORG-d58-cocul")
+corr_sample <- cor(avg_expr_sample[VariableFeatures(seurat),])
+corr_sample
+plot(hclust(as.dist(1-corr_sample)))
+table(seurat$sample)
+
+```
+#### Perform wilcoxon test on organoid all time points
+```{r perform wilcoxon test on organoid all time points}
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org <- wilcoxauc(seurat, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org$padj[DE_wilcoxauc_in_vitro_org$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org$padj[which(DE_wilcoxauc_in_vitro_org$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org <- DE_wilcoxauc_in_vitro_org %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org) 
+
+# Remove genes coding for mitochondria and ribosome proteins
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org$feature,blacklist)
+DE_wilcoxauc_in_vitro_org <- DE_wilcoxauc_in_vitro_org %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org)
+
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl.pdf", height = 5, width = 8)
+ggplot(DE_wilcoxauc_in_vitro_org, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 20) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  ylim(0,330) +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+dev.off()
+
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+filter(DE_wilcoxauc_in_vitro_org, outcome == "Up-regulated" & logFC > log(1.1))
+filter(DE_wilcoxauc_in_vitro_org, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("ENO1", "ID3", "WLS", "COL3A1", "CANX", "KDELR2", "MEST", "PGK1", "CLU", "HSPA5", "ZIC2", "PKM", "TTR", "HNRNPM", "ID3", "BNIP3", "VIM", "SELENOM", "RHOC", # upregulated
+                    "SPP1", "CRABP1", "STMN2", "SOX4", "DCX", "RBX1", "HES6", "GNG4", "TAGLN3", "NCAM1", "INA", "HMGB1", "SYNC", "RPS9", "CALM1", "DDX5", "PLCG2", "HES6", "RBX1", "MEIS2", "JPT1" # downregulated
+                                                                       )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  ylim(0,330) +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+  #geom_point(data = DE_wilcoxauc_in_vitro_mg %>% filter(feature %in% de_markers_cocul), color = "yellow") 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_labeled.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+```
+
+#### Perform wilcoxon test on organoid day 30
+```{r perform wilcoxon test on organoid day 30}
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_d30 <- wilcoxauc(seurat_org_d30, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_d30$padj[DE_wilcoxauc_in_vitro_d30$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_d30$padj[which(DE_wilcoxauc_in_vitro_d30$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_d30 <- DE_wilcoxauc_in_vitro_d30 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_d30) 
+
+
+# Remove genes coding for mitochondria and ribosome proteins
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_d30$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_d30$feature,blacklist)
+DE_wilcoxauc_in_vitro_d30 <- DE_wilcoxauc_in_vitro_d30 %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_d30)
+
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_d30, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 20) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  ylim(0,330) +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_day30_cocul_vs_ctrl.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+plot
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+filter(DE_wilcoxauc_in_vitro_d30, outcome == "Up-regulated" & logFC > log(1.1))
+filter(DE_wilcoxauc_in_vitro_d30, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("ENO1", "ATF3", "GFPT1", "COL3A1", "SERP1", "ANXA5", "KDELR2", "SEC61G", "HSPA5", "CRYAB", "TMED2", "NPC2", "P4HA1", "MIF", "TTR", "HIST2H2AA4", "BNIP3", "COL1A1", "COL1A2", # upregulated
+                    "MLLT11", "CAMK2N1", "STMN1", "H3F3A", "HES6", "TAGLN3",  "TUBB2B", "RPL10A", "TUB1A", "RTN1", "DCX", "CKB", "RPS9", "RPL13", "ZNF428", "TSMB4X", "EID1", "STMN2" # downregulated
+                                                                       )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_d30 %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_d30, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  ylim(0,330) +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+  #geom_point(data = DE_wilcoxauc_in_vitro_mg %>% filter(feature %in% de_markers_cocul), color = "yellow") 
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_day30_cocul_vs_ctrl_labeled.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+```
+
+#### Perform wilcoxon test on organoid forebrain neurons
+```{r perform wilcoxon test on organoid forebrain neurons}
+
+# Subset telencephalic neurons only
+seurat_org_forebrain <- subset(seurat, subset = celltype %in% c("Forebrain neuron")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org_forebrain <- wilcoxauc(seurat_org_forebrain, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org_forebrain$padj[DE_wilcoxauc_in_vitro_org_forebrain$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_forebrain$padj[which(DE_wilcoxauc_in_vitro_org_forebrain$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org_forebrain <- DE_wilcoxauc_in_vitro_org_forebrain %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org_forebrain) 
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_forebrain$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_forebrain$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_forebrain <- DE_wilcoxauc_in_vitro_org_forebrain %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org_forebrain)
+
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_forebrain, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 180) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+DE_wilcoxauc_in_vitro_org_forebrain.up <- filter(DE_wilcoxauc_in_vitro_org_forebrain, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_forebrain.down <- filter(DE_wilcoxauc_in_vitro_org_forebrain, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("PLCG2", "POU3F3", "NFIX", "SYNE2", "CHD3", "PRRC2B", "KMT2C", "KMT2A", # upregulated
+                      "SPP1", "TMSB4X", "PPBP", "APOE", "FTL", "FTH1", "CTSD", "S100A1", "LYZ", "CXCL5", "APOC1", "TUBA1A", "CCL2" # downregulated
+                                                                       )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_forebrain %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_forebrain, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70)
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_forebrain_neurons.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_forebrain.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_forebrain_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_forebrain.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_forebrain_DOWN.csv")
+
+```
+
+#### Perform wilcoxon test on organoid hindbrain neurons
+```{r perform wilcoxon test on organoid hindbrain neurons}
+
+# Subset hindbrain neurons only
+seurat_org_hindbrain <- subset(seurat, subset = celltype %in% c("Hindbrain neuron")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org_hindbrain <- wilcoxauc(seurat_org_hindbrain, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org_hindbrain$padj[DE_wilcoxauc_in_vitro_org_hindbrain$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_hindbrain$padj[which(DE_wilcoxauc_in_vitro_org_hindbrain$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org_hindbrain <- DE_wilcoxauc_in_vitro_org_hindbrain %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org_hindbrain) 
+
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_hindbrain$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_hindbrain$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_hindbrain <- DE_wilcoxauc_in_vitro_org_hindbrain %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org_hindbrain)
+
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_hindbrain, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 60) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+DE_wilcoxauc_in_vitro_org_hindbrain.up <- filter(DE_wilcoxauc_in_vitro_org_hindbrain, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_hindbrain.down <- filter(DE_wilcoxauc_in_vitro_org_hindbrain, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("MAP1B", "PTMS", "TTR", "PKM", "ENO2", "SMARCA4", "SF3B2", "CHD4", "BRD4", "KCNQ1OT1", "BRD4", "NEFM", # upregulated
+                      "PLCG2", "MTRNR2L12", "COX7C", "ATP5F1E", "NDUFA4", "MATR3.1", "SYNC", "CALM2", "HINT1", "NDUFB4", "ZFAS1" # downregulated
+                                                                       )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_hindbrain %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_hindbrain, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+  #geom_point(data = DE_wilcoxauc_in_vitro_mg %>% filter(feature %in% de_markers_cocul), color = "yellow") 
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_hindbrain_neurons.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_hindbrain.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_hindbrain_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_hindbrain.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_hindbrain_DOWN.csv")
+
+```
+
+#### Perform wilcoxon test on organoid retina
+```{r perform wilcoxon test on organoid retina}
+
+# Subset choroid plexus only
+seurat_org_retina <- subset(seurat, subset = celltype %in% c("Retina")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org_retina<- wilcoxauc(seurat_org_retina, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org_retina$padj[DE_wilcoxauc_in_vitro_org_retina$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_retina$padj[which(DE_wilcoxauc_in_vitro_org_retina$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org_retina <- DE_wilcoxauc_in_vitro_org_retina %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org_retina) 
+
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_retina$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_retina$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_retina <- DE_wilcoxauc_in_vitro_org_retina %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org_retina)
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_retina, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+DE_wilcoxauc_in_vitro_org_retina.up <- filter(DE_wilcoxauc_in_vitro_org_retina, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_retina.down <- filter(DE_wilcoxauc_in_vitro_org_retina, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("SPP1", "FTL", "S100A11", "FTH", "PPBP", "APOC1", "CXCL5", "APOE", "CTSD", "LYZ", "CCL2" # downregulated
+                                                                       )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_retina %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_retina, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 50) 
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_retina.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_retina.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_retina_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_retina.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_retina_DOWN.csv")
+
+```
+#### Perform wilcoxon test on organoid choroid plexus
+```{r perform wilcoxon test on organoid choroid plexus}
+
+# Subset choroid plexus only
+seurat_org_choroid <- subset(seurat, subset = celltype %in% c("Choroid plexus")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org_choroid <- wilcoxauc(seurat_org_choroid, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org_choroid$padj[DE_wilcoxauc_in_vitro_org_choroid$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_choroid$padj[which(DE_wilcoxauc_in_vitro_org_choroid$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org_choroid <- DE_wilcoxauc_in_vitro_org_choroid %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org_choroid) 
+
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_choroid$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_choroid$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_choroid <- DE_wilcoxauc_in_vitro_org_choroid %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org_choroid)
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_choroid, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+DE_wilcoxauc_in_vitro_org_choroid.up <- filter(DE_wilcoxauc_in_vitro_org_choroid, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_choroid.down <- filter(DE_wilcoxauc_in_vitro_org_choroid, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("PLCG2", "MTRNR2L12", "PFDN5", "NPM1", "UQCRH", "ATP5F1E", "ATP5MG", "MIF", "RBX1", "CD63", "KRTCAP2", "EID1", # upregulated
+"MAP1B", "MEST", "PKM", "PEG10", "PABPC1", "PRMT2", "TUBB", "CHD4", "ENO1", "KCNQ1OT1", "EEF2", "GAPDH","SFRB2" # downregulated
+                      )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_choroid %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_choroid, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_choroid.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_choroid.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_choroid_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_choroid.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_choroid_DOWN.csv")
+
+```
+
+#### Perform wilcoxon test on organoid immature choroid plexus
+```{r perform wilcoxon test on organoid immature choroid plexus}
+
+# Subset choroid plexus only
+seurat_org_im_choroid <- subset(seurat, subset = celltype %in% c("Immature choroid plexus 1", "Immature choroid plexus 2")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org_im_choroid <- wilcoxauc(seurat_org_im_choroid, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org_im_choroid$padj[DE_wilcoxauc_in_vitro_org_im_choroid$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_im_choroid$padj[which(DE_wilcoxauc_in_vitro_org_im_choroid$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org_im_choroid <- DE_wilcoxauc_in_vitro_org_im_choroid %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org_im_choroid) 
+
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_im_choroid$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_im_choroid$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_im_choroid <- DE_wilcoxauc_in_vitro_org_im_choroid %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org_im_choroid)
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_im_choroid, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+DE_wilcoxauc_in_vitro_org_im_choroid.up <- filter(DE_wilcoxauc_in_vitro_org_im_choroid, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_im_choroid.down <- filter(DE_wilcoxauc_in_vitro_org_im_choroid, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("PLCG2", "CALM2", "TMSB4X", "DDX5", "ARF4", "PFDN5", "MORF4L2", "STMN2", "STMN4", "RTN3", "TAGLN3", "EID1", "BEX3",# upregulated
+"TTR", "PKM", "GAPDH", "PABPC1", "ENO1", "SLC2A1", "ENO2", "ST13", "SF3B2", "P4HA1", "TPI1", "BNIP3","MEST", "NEAT1", "GPI", "ALKBH5", "WDR45B", "HK2", "HILPDA" # downregulated
+                      )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_im_choroid %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_im_choroid, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_immature_choroid.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_im_choroid.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_im_choroid_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_im_choroid.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_im_choroid_DOWN.csv")
+
+```
+
+#### Perform wilcoxon test on organoid choroid plexus stroma
+```{r perform v test on organoid choroid plexus stroma}
+
+# Subset choroid plexus only
+seurat_org_ch_stroma <- subset(seurat, subset = celltype %in% c("Choroid plexus stroma")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org_ch_stroma <- wilcoxauc(seurat_org_ch_stroma, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org_ch_stroma$padj[DE_wilcoxauc_in_vitro_org_ch_stroma$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_ch_stroma$padj[which(DE_wilcoxauc_in_vitro_org_ch_stroma$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org_ch_stroma <- DE_wilcoxauc_in_vitro_org_ch_stroma %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org_ch_stroma) 
+
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_ch_stroma$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_ch_stroma$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_ch_stroma <- DE_wilcoxauc_in_vitro_org_ch_stroma %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org_ch_stroma)
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_ch_stroma, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 20) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+DE_wilcoxauc_in_vitro_org_ch_stroma.up <- filter(DE_wilcoxauc_in_vitro_org_ch_stroma, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_ch_stroma.down <- filter(DE_wilcoxauc_in_vitro_org_ch_stroma, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("H3F3A", "PLCG2", "RACK1", "TUBB2B", "EID1", "SRP14", "PFDN5", "ZNF428", "MARCKSL1", "SNRPE", "PHF6", "DDX5", "FOXD3", "CIRBP", "BEX3", "SUMO2", "NDUFA4", "TUBA1A", "RHF6", # upregulated
+"PABPC1", "P4HB", "COL1A1", "HSPA5", "HSP90B1", "COL6A2", "COL3A1", "TIMP1", "AKAP12", "MGP", "POSTN", "ANXA1", "IFI16", "RCN1", "FN1", "BGN", "LGALS3", "SEZ6L", "B2M" # downregulated
+                        )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_ch_stroma %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_ch_stroma, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_choroid_stroma.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_ch_stroma.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_ch_stroma_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_ch_stroma.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_ch_stroma_DOWN.csv")
+
+```
+
+#### Perform wilcoxon test on organoid forebrain neuron progenitors
+```{r perform wilcoxon test on organoid forebrain neuron progenitors}
+
+seurat_org_forebrain_npc <- subset(seurat, subset = celltype %in% c("Forebrain neuron progenitor")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+DE_wilcoxauc_in_vitro_org_forebrain_npc <- wilcoxauc(seurat_org_forebrain_npc, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+DE_wilcoxauc_in_vitro_org_forebrain_npc$padj[DE_wilcoxauc_in_vitro_org_forebrain_npc$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_forebrain_npc$padj[which(DE_wilcoxauc_in_vitro_org_forebrain_npc$padj != 0)])
+DE_wilcoxauc_in_vitro_org_forebrain_npc <- DE_wilcoxauc_in_vitro_org_forebrain_npc %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_forebrain_npc$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_forebrain_npc$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_forebrain_npc <- DE_wilcoxauc_in_vitro_org_forebrain_npc %>% filter(feature %in% diff_genes)
+
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_forebrain_npc, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 20) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+# Now plot marking genes of interest only
+# Choose genes looking at the top different ones
+DE_wilcoxauc_in_vitro_org_forebrain_npc.up <- filter(DE_wilcoxauc_in_vitro_org_forebrain_npc, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_forebrain_npc.down <- filter(DE_wilcoxauc_in_vitro_org_forebrain_npc, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("PABPC1", "EIF4B", "AKAP12", "MAP1B", "EEF2", "ANKRD11", "PKM", "CHD4", "GOLGA4", "ENO1", "CANX", "BNIP3", "ST13", "CCNI", "HK1", # upregulated
+"BEX3", "TMSB4X", "HINT1", "GSTP1", "COX6C", "ATP4F1E", "SPP1", "MTRNR2L12", "MZT2B", "TXN", "DNPH1", "C1orf61", "BEX1", "TMSB15A", "SRP14", "H3F3A" # downregulated
+                        )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_forebrain_npc %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_forebrain_npc, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_forebrain_npc.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_forebrain_npc.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_forebrain_npc_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_forebrain_npc.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_forebrain_npc_DOWN.csv")
+
+```
+#### Perform wilcoxon test on organoid immature choroid plexus 2
+```{r perform wilcoxon test on organoid immature choroid plexus 2}
+
+# Subset immature choroid plexus 2 only
+seurat_org_im_choroid_2 <- subset(seurat, subset = celltype %in% c("Immature choroid plexus 2")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+
+# Run wilcoxon test
+DE_wilcoxauc_in_vitro_org_im_choroid_2 <- wilcoxauc(seurat_org_im_choroid_2, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+
+# Many padj values equal 0, meaning that they go to infinity as -lo10(padj) and cannot be plotted.
+# The reason is that wilcoaux function rounds extremely small values to 0.
+# To circumvent this is issue, we can change the 0 p-values (or p-adjusted values) to take the minimum value detected.
+DE_wilcoxauc_in_vitro_org_im_choroid_2$padj[DE_wilcoxauc_in_vitro_org_im_choroid_2$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_im_choroid_2$padj[which(DE_wilcoxauc_in_vitro_org_im_choroid_2$padj != 0)])
+
+# Add to the table another column wtih outcome
+DE_wilcoxauc_in_vitro_org_im_choroid_2 <- DE_wilcoxauc_in_vitro_org_im_choroid_2 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(DE_wilcoxauc_in_vitro_org_im_choroid_2) 
+
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_im_choroid_2$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_im_choroid_2$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_im_choroid_2 <- DE_wilcoxauc_in_vitro_org_im_choroid_2 %>% filter(feature %in% diff_genes)
+nrow(DE_wilcoxauc_in_vitro_org_im_choroid_2)
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_im_choroid_2, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 30) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+DE_wilcoxauc_in_vitro_org_im_choroid_2.up <- filter(DE_wilcoxauc_in_vitro_org_im_choroid_2, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_im_choroid_2.down <- filter(DE_wilcoxauc_in_vitro_org_im_choroid_2, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("TTR", "PKM", "ENO2", "ST13", "ENO1", "PABPC1", "GAPDH", "SLC2A1", "SF3B2", "WDR45B", "P4HA1", "BNIP3", "RBPJ", "NEAT1", "TPI1", "BRD4", # upregulated
+"PLCG2", "TMSB4X", "CALM2", "PFDN5", "EID1", "ARF4", "BEX3", "ATP5MC3", "UQCRH" # downregulated
+                      )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_im_choroid_2 %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_im_choroid_2, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_immature_choroid_2.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_im_choroid_2.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_im_choroid_2_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_im_choroid_2.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_im_choroid_2_DOWN.csv")
+
+```
+
+#### Perform wilcoxon test on organoid hindbrain neuron progenitor 1
+```{r perform wilcoxon test on organoid hindbrain neuron progenitor 1}
+
+seurat_org_hind_npc_1 <- subset(seurat, subset = celltype %in% c("Hindbrain neuron progenitor 1")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+DE_wilcoxauc_in_vitro_org_hind_npc_1 <- wilcoxauc(seurat_org_hind_npc_1, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+DE_wilcoxauc_in_vitro_org_hind_npc_1$padj[DE_wilcoxauc_in_vitro_org_hind_npc_1$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_hind_npc_1$padj[which(DE_wilcoxauc_in_vitro_org_hind_npc_1$padj != 0)])
+DE_wilcoxauc_in_vitro_org_hind_npc_1 <- DE_wilcoxauc_in_vitro_org_hind_npc_1 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_hind_npc_1$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_hind_npc_1$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_hind_npc_1 <- DE_wilcoxauc_in_vitro_org_hind_npc_1 %>% filter(feature %in% diff_genes)
+
+# plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_hind_npc_1, aes(x = logFC, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_text_repel(max.overlaps = 50) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+plot
+
+DE_wilcoxauc_in_vitro_org_hind_npc_1.up <- filter(DE_wilcoxauc_in_vitro_org_hind_npc_1, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_hind_npc_1.down <- filter(DE_wilcoxauc_in_vitro_org_hind_npc_1, outcome == "Down-regulated" & logFC < -log(1.1))
+
+# Make a vector of chosen genes
+de_markers_cocul <- c("MAP1B", "ENO1", "PKM", "TTR", "TPI1", "PGK1", "ACTB", "SF3B2", "MEST", "CANX", "BRD4", "NEAT", "PTN", # upregulated
+"PLCG2", "MTRNR2L12", "COX7C", "ATP5F1E", "SYNC", "PFDN5", "NACA", "ATP5MG", "LSM7", "TMA7", "UQCRH", "OST4" # downregulated
+                      )
+
+# Filter them from the data frame
+de_markers <- DE_wilcoxauc_in_vitro_org_hind_npc_1 %>% filter(feature %in% de_markers_cocul)
+
+# Plot
+plot <- ggplot(DE_wilcoxauc_in_vitro_org_hind_npc_1, aes(x = logFC, y = -log10(padj))) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  #geom_text_repel(max.overlaps = 70) +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#58B6AC", "gray50", "#C73E04")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj"))
+
+# Add labels
+plot <- plot +
+  geom_label_repel(data = de_markers, mapping = aes(logFC, -log10(padj), label = feature), size = 3, max.overlaps = 70) #+
+plot 
+
+# plot
+pdf("Plots/Co-culture_timecourse/Organoid_data/volcano_DE_cocul_vs_ctrl_hindbrain_npc_1.pdf", height = 5, width = 8)
+plot
+dev.off()
+
+write.csv(DE_wilcoxauc_in_vitro_org_hind_npc_1.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_hind_npc_1_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_hind_npc_1.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_hind_npc_1_DOWN.csv")
+
+```
+
+
+```{r prepare tables with DEGs for all other cell types}
+
+seurat_org_im_choroid_1 <- subset(seurat, subset = celltype %in% c("Immature choroid plexus 1")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+DE_wilcoxauc_in_vitro_org_im_choroid_1 <- wilcoxauc(seurat_org_im_choroid_1, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+DE_wilcoxauc_in_vitro_org_im_choroid_1$padj[DE_wilcoxauc_in_vitro_org_im_choroid_1$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_im_choroid_1$padj[which(DE_wilcoxauc_in_vitro_org_im_choroid_1$padj != 0)])
+DE_wilcoxauc_in_vitro_org_im_choroid_1 <- DE_wilcoxauc_in_vitro_org_im_choroid_1 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_im_choroid_1$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_im_choroid_1$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_im_choroid_1 <- DE_wilcoxauc_in_vitro_org_im_choroid_1 %>% filter(feature %in% diff_genes)
+
+DE_wilcoxauc_in_vitro_org_im_choroid_1.up <- filter(DE_wilcoxauc_in_vitro_org_im_choroid_1, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_im_choroid_1.down <- filter(DE_wilcoxauc_in_vitro_org_im_choroid_1, outcome == "Down-regulated" & logFC < -log(1.1))
+
+write.csv(DE_wilcoxauc_in_vitro_org_im_choroid_1.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_im_choroid_1_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_im_choroid_1.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_im_choroid_1_DOWN.csv")
+
+
+seurat_org_prolif_npc <- subset(seurat, subset = celltype %in% c("Proliferating neuron progenitor")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+DE_wilcoxauc_in_vitro_org_prolif_npc <- wilcoxauc(seurat_org_prolif_npc, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+DE_wilcoxauc_in_vitro_org_prolif_npc$padj[DE_wilcoxauc_in_vitro_org_prolif_npc$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_prolif_npc$padj[which(DE_wilcoxauc_in_vitro_org_prolif_npc$padj != 0)])
+DE_wilcoxauc_in_vitro_org_prolif_npc <- DE_wilcoxauc_in_vitro_org_prolif_npc %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_prolif_npc$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_prolif_npc$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_prolif_npc <- DE_wilcoxauc_in_vitro_org_prolif_npc %>% filter(feature %in% diff_genes)
+
+DE_wilcoxauc_in_vitro_org_prolif_npc.up <- filter(DE_wilcoxauc_in_vitro_org_prolif_npc, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_prolif_npc.down <- filter(DE_wilcoxauc_in_vitro_org_prolif_npc, outcome == "Down-regulated" & logFC < -log(1.1))
+
+write.csv(DE_wilcoxauc_in_vitro_org_prolif_npc.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_prolif_npc_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_prolif_npc.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_prolif_npc_DOWN.csv")
+
+
+seurat_org_hind_npc_2 <- subset(seurat, subset = celltype %in% c("Hindbrain neuron progenitor 2")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+DE_wilcoxauc_in_vitro_org_hind_npc_2 <- wilcoxauc(seurat_org_hind_npc_2, group_by = "condition") %>%
+  filter(group == "COCUL") %>%
+  mutate(DE = abs(logFC)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(logFC)>log(1.1) & padj < 0.01, feature, NA))
+DE_wilcoxauc_in_vitro_org_hind_npc_2$padj[DE_wilcoxauc_in_vitro_org_hind_npc_2$padj == 0.000000e+00] <- min(DE_wilcoxauc_in_vitro_org_hind_npc_2$padj[which(DE_wilcoxauc_in_vitro_org_hind_npc_2$padj != 0)])
+DE_wilcoxauc_in_vitro_org_hind_npc_2 <- DE_wilcoxauc_in_vitro_org_hind_npc_2 %>% 
+  mutate(
+    outcome = case_when(logFC > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           logFC < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+blacklist <- c(grep("^MT-", DE_wilcoxauc_in_vitro_org_hind_npc_2$feature, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(DE_wilcoxauc_in_vitro_org_hind_npc_2$feature,blacklist)
+DE_wilcoxauc_in_vitro_org_hind_npc_2 <- DE_wilcoxauc_in_vitro_org_hind_npc_2 %>% filter(feature %in% diff_genes)
+
+DE_wilcoxauc_in_vitro_org_hind_npc_2.up <- filter(DE_wilcoxauc_in_vitro_org_hind_npc_2, outcome == "Up-regulated" & logFC > log(1.1))
+DE_wilcoxauc_in_vitro_org_hind_npc_2.down <- filter(DE_wilcoxauc_in_vitro_org_hind_npc_2, outcome == "Down-regulated" & logFC < -log(1.1))
+
+write.csv(DE_wilcoxauc_in_vitro_org_hind_npc_2.up, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_hind_npc_2_UP.csv")
+write.csv(DE_wilcoxauc_in_vitro_org_hind_npc_2.down, "Plots/Co-culture_timecourse/Organoid_data/DE_wilcoxauc_in_vitro_org_hind_npc_2_DOWN.csv")
+
+```
+
+```{r create a table with no. DEGs all cell types}
+
+# list of all tables:
+# DE_wilcoxauc_in_vitro_org_im_choroid_1
+# DE_wilcoxauc_in_vitro_org_im_choroid_2
+# DE_wilcoxauc_in_vitro_org_ch_stroma
+# DE_wilcoxauc_in_vitro_org_choroid
+# DE_wilcoxauc_in_vitro_org_forebrain_npc
+# DE_wilcoxauc_in_vitro_org_hind_npc_1
+# DE_wilcoxauc_in_vitro_org_hind_npc_2
+# DE_wilcoxauc_in_vitro_org_prolif_npc
+# DE_wilcoxauc_in_vitro_org_retina
+# DE_wilcoxauc_in_vitro_org_hindbrain
+# DE_wilcoxauc_in_vitro_org_forebrain
+
+list_DE_tables <- list(DE_wilcoxauc_in_vitro_org_prolif_npc, DE_wilcoxauc_in_vitro_org_hind_npc_1, DE_wilcoxauc_in_vitro_org_hind_npc_2,DE_wilcoxauc_in_vitro_org_hindbrain, DE_wilcoxauc_in_vitro_org_forebrain, DE_wilcoxauc_in_vitro_org_forebrain_npc, DE_wilcoxauc_in_vitro_org_im_choroid_1, DE_wilcoxauc_in_vitro_org_im_choroid_2, DE_wilcoxauc_in_vitro_org_choroid, DE_wilcoxauc_in_vitro_org_ch_stroma, DE_wilcoxauc_in_vitro_org_retina)
+
+no.DEGs <- matrix(c("DE_wilcoxauc_in_vitro_org_prolif_npc", "DE_wilcoxauc_in_vitro_org_hind_npc_1", "DE_wilcoxauc_in_vitro_org_hind_npc_2","DE_wilcoxauc_in_vitro_org_hindbrain", "DE_wilcoxauc_in_vitro_org_forebrain", "DE_wilcoxauc_in_vitro_org_forebrain_npc", "DE_wilcoxauc_in_vitro_org_im_choroid_1", "DE_wilcoxauc_in_vitro_org_im_choroid_2", "DE_wilcoxauc_in_vitro_org_choroid",  "DE_wilcoxauc_in_vitro_org_ch_stroma", "DE_wilcoxauc_in_vitro_org_retina"), ncol=1, byrow=TRUE)
+no.DEGs <- as.data.frame(no.DEGs)
+colnames(no.DEGs) <- c("celltype")
+
+no.up <- c()
+no.down <- c()
+for (i in list_DE_tables) {
+  no.up <- rbind(no.up, sum(i$outcome == "Up-regulated"))
+  no.down <- rbind(no.down, sum(i$outcome ==  "Down-regulated"))
+}
+
+no.DEGs$no.up <- no.up
+no.DEGs$no.down <- no.down
+
+no.DEGs$celltype <- factor(no.DEGs$celltype,levels = c("DE_wilcoxauc_in_vitro_org_prolif_npc", "DE_wilcoxauc_in_vitro_org_hind_npc_1", "DE_wilcoxauc_in_vitro_org_hind_npc_2","DE_wilcoxauc_in_vitro_org_hindbrain", "DE_wilcoxauc_in_vitro_org_forebrain", "DE_wilcoxauc_in_vitro_org_forebrain_npc", "DE_wilcoxauc_in_vitro_org_im_choroid_1", "DE_wilcoxauc_in_vitro_org_im_choroid_2", "DE_wilcoxauc_in_vitro_org_choroid",  "DE_wilcoxauc_in_vitro_org_ch_stroma", "DE_wilcoxauc_in_vitro_org_retina"))
+
+cols <- c( "#9A5C6B","#6B6D84","#54768D","#3F8C70","#65935B","#ACA64D","#E7AF40","#E0922C","#DB7A2F","#DA6138","#DD4345")
+  
+pdf("Plots/Co-culture_timecourse/Organoid_data/lollipop_DEGs_up.pdf", height = 7, width = 5)
+ggplot(no.DEGs, aes(x = celltype, y = no.up)) +
+  geom_segment(aes(x = celltype, xend = celltype, y = 0, yend = no.up), col = col_ct) +
+  geom_point(aes(x=celltype, y=no.up), size = 8, col = cols) +
+  geom_text(aes(x=celltype,  y=no.up, label = no.up), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cell type") + 
+  ylab("Number of up-regualted DEGs") +
+  ylim(0, 900) +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/Organoid_data/lollipop_DEGs_down.pdf", height = 7, width = 5)
+ggplot(no.DEGs, aes(x = celltype, y = no.down)) +
+  geom_segment(aes(x = celltype, xend = celltype, y = 0, yend = no.down), col = col_ct) +
+  geom_point(aes(x=celltype, y=no.down), size = 8, col = cols) +
+  geom_text(aes(x=celltype,  y=no.down, label = no.down), color = "black", size = 3) +
+  theme_classic() +
+  xlab("Cell type") + 
+  ylab("Number of down-regualted DEGs") +
+  ylim(0, 900) +
+  theme(axis.text.x = element_text( angle = 45, hjust = 1)) 
+dev.off()
+
+```
+
+#### Perform GO of the DEGs
+```{r enrichR}
+
+library(enrichR)
+databases <- listEnrichrDbs()
+databases <- databases[order(databases$libraryName),]
+databases$libraryName
+
+dbs <- c("Reactome_2022", "KEGG_2021_Human", "WikiPathway_2021_Human")
+
+forebrain_npc.up <- DE_wilcoxauc_in_vitro_org_forebrain_npc.up$feature
+forebrain_npc.enriched <- enrichr(forebrain_npc.up, dbs)
+pdf("Plots/Co-culture_timecourse/Organoid_data/GO_terms_forebrain_npc.enriched.pdf", height = 5, width = 30)
+plotEnrich(forebrain_npc.enriched[[1]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "Reactome_2022 forebrain_npc.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(forebrain_npc.enriched[[2]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "KEGG_2021_Human forebrain_npc.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(forebrain_npc.enriched[[3]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "WikiPathway_2021_Human forebrain_npc.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic()
+dev.off()
+
+forebrain_npc.down <- DE_wilcoxauc_in_vitro_org_forebrain_npc.down$feature
+forebrain_npc.depleted <- enrichr(forebrain_npc.down, dbs)
+pdf("Plots/Co-culture_timecourse/Organoid_data/GO_terms_forebrain_npc.depleted.pdf", height = 5, width = 30)
+plotEnrich(forebrain_npc.depleted[[1]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "Reactome_2022 forebrain_npc.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(forebrain_npc.depleted[[2]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "KEGG_2021_Human forebrain_npc.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(forebrain_npc.depleted[[3]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "WikiPathway_2021_Human forebrain_npc.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic()
+dev.off()
+
+hindbrain_npc_1.up <- DE_wilcoxauc_in_vitro_org_hind_npc_1.up$feature
+hindbrain_npc_1.enriched<- enrichr(hindbrain_npc_1.up, dbs)
+pdf("Plots/Co-culture_timecourse/Organoid_data/GO_terms_hindbrain_npc_1.enriched.pdf", height = 5, width = 30)
+plotEnrich(hindbrain_npc_1.enriched[[1]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "Reactome_2022 hindbrain_npc_1.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(hindbrain_npc_1.enriched[[2]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "KEGG_2021_Human hindbrain_npc_1.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(hindbrain_npc_1.enriched[[3]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "WikiPathway_2021_Human hindbrain_npc_1.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic()
+dev.off()
+
+hindbrain_npc_1.down <- DE_wilcoxauc_in_vitro_org_hind_npc_1.down$feature
+hindbrain_npc_1.depleted <- enrichr(hindbrain_npc_1.down, dbs)
+pdf("Plots/Co-culture_timecourse/Organoid_data/GO_terms_hindbrain_npc_1.depleted.pdf", height = 5, width = 30)
+plotEnrich(hindbrain_npc_1.depleted[[1]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "Reactome_2022 hindbrain_npc_1.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(hindbrain_npc_1.depleted[[2]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "KEGG_2021_Human hindbrain_npc_1.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(hindbrain_npc_1.depleted[[3]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "WikiPathway_2021_Human hindbrain_npc_1.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic()
+dev.off()
+
+im_choroid_2.up <- DE_wilcoxauc_in_vitro_org_im_choroid_2.up$feature
+im_choroid_2.enriched <- enrichr(im_choroid_2.up, dbs)
+pdf("Plots/Co-culture_timecourse/Organoid_data/GO_terms_im_choroid_2.enriched.pdf", height = 5, width = 30)
+plotEnrich(im_choroid_2.enriched[[1]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "Reactome_2022 im_choroid_2.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(im_choroid_2.enriched[[2]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "KEGG_2021_Human im_choroid_2.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(im_choroid_2.enriched[[3]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "WikiPathway_2021_Human im_choroid_2.enriched") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic()
+dev.off()
+
+im_choroid_2.down <- DE_wilcoxauc_in_vitro_org_im_choroid_2.down$feature
+im_choroid_2.depleted <- enrichr(im_choroid_2.down, dbs)
+pdf("Plots/Co-culture_timecourse/Organoid_data/GO_terms_im_choroid_2.depleted.pdf", height = 5, width = 30)
+plotEnrich(im_choroid_2.depleted[[1]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "Reactome_2022 im_choroid_2.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(im_choroid_2.depleted[[2]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "KEGG_2021_Human im_choroid_2.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic() |
+plotEnrich(im_choroid_2.depleted[[3]], showTerms = 10, numChar = 40, y = "Count", orderBy = "P.value", title = "WikiPathway_2021_Human im_choroid_2.depleted") + scale_fill_gradientn(colours = rev(green_feature_cols(8))) + theme_classic()
+dev.off()
+
+```
+
+

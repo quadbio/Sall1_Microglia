@@ -1,0 +1,134 @@
+---
+title: "Analysis of integrates SALL1 OE iMGL (with Hygromycin-selection reference)"
+author: "Marina Nikolova"
+date: "2024-12-01"
+output: html_document
+---
+
+
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/SALL1_Overexpression/SALL1_OE_exp3_coculture/Analysis")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+library(gplots)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+```
+
+```{r load seurat object}
+
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/SALL1_Overexpression/SALL1_OE_exp3_coculture/Analysis/Objects/sall1_mg_exp3_cocul_integrated_with_Hygro_ref.rds")
+
+sall1_levels <- factor(c("GFP_MG_COCUL_D15", "GFP_MG_COCUL_D29", "SALL1_MG_COCUL_D15", "SALL1_MG_COCUL_D29"))
+seurat$orig.ident <- factor(seurat$orig.ident, levels = sall1_levels)
+Idents(seurat) <- "orig.ident"
+
+# generate color palette based on vintage_cols palette
+sall1_col <-setNames(c(c("#E69000", "#d64b0f", "#99cfc9","#026D7D")), sall1_levels)
+
+```
+
+#### Name clusters
+First I had run FindAllMarkers to find the markers per cluster, then I renamed the clusters according to the markers and then rerun the marker finding for each cell type
+
+```{r find cell type markers of all cells}
+
+Idents(seurat) <- "RNA_snn_res.0.2"
+
+table(seurat$orig.ident, seurat$RNA_snn_res.0.2)
+
+cl_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/top_cl_markers.csv")
+write.csv(top50_cl_markers, "Plots/top50_cl_markers.csv")
+write.csv(top_cl_markers, "Plots/top_cl_markers.csv")
+
+DimPlot(seurat, reduction="umap_css",  group.by="RNA_snn_res.0.2", cols = rev(rainbow_pastel_cols(12)), pt.size = 0.3) & NoAxes()
+DimPlot(seurat, reduction="umap_css",  group.by="RNA_snn_res.0.2", cols = rev(rainbow_pastel_cols(12)), pt.size = 0.1, split.by = "condition") & NoAxes()
+
+DotPlot(seurat, features = top2_cl_markers$gene) + RotatedAxis()
+DotPlot(seurat, features = c("AIF1", "CX3CR1", "SALL1", "CDH1")) + RotatedAxis()
+
+table(seurat$RNA_snn_res.0.2)
+table(seurat$condition)
+table(seurat$RNA_snn_res.0.2, seurat$condition)
+
+```
+```{r}
+
+test <- subset(seurat, subset = Hygro > 0.1)
+table(test$condition, test$RNA_snn_res.0.2)
+
+#  cluster   0   1   2   3   4   5   6   7   8   9  10  11
+#  control   1   0   0   1   0 152   1   0   0   2   0   0
+#  OE        2   1   1   2   0 253   1   0   0   0   0   0
+  
+```
+
+```{r name clusters}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "RNA_snn_res.0.2"
+
+seurat$celltype <- factor(setNames(c("Hindbrain neuron", # 0 PBX3, MEIS2 - https://www.nature.com/articles/s41467-019-12054-3 ; (hindbrain??)
+                                     "Immature choroid plexus 1", # 1 TRMT112, IGFBP2, RNMT
+                                     "Forebrain neuron", # 2 NEUROD6, NFIB, NFIA, NEUROD2
+                                     "Immature forebrain neuron", # 3 FOXP1, EBF1, SYT4, TAC1, DLX6, MEIS2, ROBO1
+                                     "Progenitors", # 4 HES5, CENPF, TOP2A, UBE2C, HMGB2, SFRP1, VIM, NUSAP1, FABP7
+                                     "Microglia", # 5 TPM2, TAGLN, COL1A1, CALD1, TPM3 high
+                                     "Epithelia", # 6 KRT17, S100A8, KRT19, S100A6, ANXA1
+                                     "", # 7
+                                     "Forebrain interneuron", # 8 CRABP1, FSTL5, TRH, GNG8, CALB2, ATF5, AVP, EPCAM, EFNA5, EMX2, GPX2, S100A6
+                                     "Fibroblast", # 9
+                                     "Choroid plexus", # 10
+                                     "Fibroblast" # 11 FN1, IGFBP7, IFITM3, S100B, COL1A2, VIM, OLFML2A, COL1A1, PMP22
+                                     ), levels(seurat@active.ident))[seurat@active.ident])
+
+ct_levels <- factor(c("BAM_1", "BAM_2",  "PAM_1", "PAM_2", "proliferating", "muscle-like"))
+seurat$celltype <- factor(x = seurat$celltype, levels = ct_levels)
+
+pdf("Plots/umap_by_celltype.pdf", width = 6, height = 4)
+DimPlot(seurat, reduction = "umap_css", group.by = "celltype",pt.size = 0.5, label=F, cols=rev(rainbow_pastel_cols(6))) & NoAxes()
+dev.off()
+    
+png("Plots/umap_by_celltype.png", width = 2800, height = 1900, res = 400)
+DimPlot(seurat, reduction="umap_css", pt.size = 0.4, label = T) & NoAxes()
+dev.off()
+
+```
+

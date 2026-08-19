@@ -1,0 +1,136 @@
+---
+title: "SALL1 OE iMGL exp1"
+author: "Marina Nikolova"
+date: "2023-04-20"
+output: html_document
+---
+
+# Basic setup
+## Prepare the environment
+```{r setup, include=FALSE, echo = F}
+
+# set working directory for the whole Rmarkdown (with setwd () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+## Load packages
+```{r load packages, echo = F}
+
+library(Seurat)
+library(dplyr)
+library(SeuratWrappers)
+library(simspec)
+library(presto)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+```
+
+# General data preparation
+#### Read in the data
+```{r reading the data}
+
+ctrl <- CreateSeuratObject(Read10X("/home/marinani/PhD_Projects/Microglia/Microglia_article/Data/SALL1_overexpression/sall1_2d_day15_ctrl/"), project = "CTRL")
+sall1_1 <- CreateSeuratObject(Read10X("/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/iMGL_SALL1_gfp_1/outs/filtered_feature_bc_matrix/"), project = "SALL1_rep1")
+sall1_2 <- CreateSeuratObject(Read10X("/links/groups/treutlein/DATA/sequencing/20230412_P2364_MARINA_MECOM_KO_and_diabetic_BVOs/processed/iMGL_SALL1_gfp_2/outs/filtered_feature_bc_matrix/"), project = "SALL1_rep2")
+
+```
+
+```{r create a merged object}
+
+ctrl <- NormalizeData(ctrl) %>%
+  PercentageFeatureSet("^MT-", col.name = "percent.mt")
+sall1_1 <- NormalizeData(sall1_1) %>%
+  PercentageFeatureSet("^MT-", col.name = "percent.mt")
+sall1_2 <- NormalizeData(sall1_2) %>%
+  PercentageFeatureSet("^MT-", col.name = "percent.mt")
+merged <- merge(ctrl, list(sall1_1, sall1_2))
+
+```
+
+#### QC and integration
+```{r check QC pre-filtering}
+
+# reorder the samples in the metadata to appear in the order desired by us
+sall1_levels <- factor(c("CTRL", "SALL1_rep1", "SALL1_rep2"))
+merged$orig.ident <- factor(merged$orig.ident, levels = sall1_levels)
+Idents(merged) <- "orig.ident"
+# generate color palette based on vintage_cols palette
+sall1_col <-setNames(c(c("#E69000","#58B6AC", "#026D7D")), sall1_levels)
+
+pdf("Plots/SALL1_overexpression/nFeature_pre-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/SALL1_overexpression/nCount_pre-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/SALL1_overexpression/percent.mt_pre-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+```
+
+```{r filter cells and filtering}
+
+# subset cells based on QC metrics
+merged <- subset(merged, subset =  nFeature_RNA > 2000 & percent.mt < 30)
+
+```
+
+```{r check QC post-filtering}
+
+pdf("Plots/SALL1_overexpression/nFeature_post-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nFeature_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/SALL1_overexpression/nCount_post-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("nCount_RNA"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+pdf("Plots/SALL1_overexpression/percent.mt_post-QC.pdf", width = 6, height = 5)
+VlnPlot(merged, features = c("percent.mt"), cols = sall1_col, split.by = "orig.ident", pt.size = 0)
+dev.off()
+
+```
+
+```{r pre-process and integrate}
+
+sall1_mg <- FindVariableFeatures(merged, nfeatures = 5000) %>%
+  CellCycleScoring(g2m.features = cc.genes.updated.2019$g2m.genes, s.features = cc.genes.updated.2019$s.genes)
+blacklist <- c(unlist(cc.genes.updated.2019), grep("^MT-", rownames(sall1_mg), value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+VariableFeatures(sall1_mg) <- setdiff(VariableFeatures(sall1_mg), blacklist)
+sall1_mg <- ScaleData(sall1_mg, vars.to.regress = c("G2M.Score","S.Score", "percent.mt", "nFeature_RNA")) %>%
+  RunPCA(npcs = 30, verbose=F) 
+
+sall1_mg <- cluster_sim_spectrum(sall1_mg, label_tag="orig.ident", cluster_resolution = 1)
+sall1_mg <- RunUMAP(sall1_mg, reduction="css", dims=1:ncol(Embeddings(sall1_mg,"css")), reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 46)
+
+sall1_mg <- FindNeighbors(sall1_mg, reduction="css", dims=1:ncol(Embeddings(sall1_mg,"css"))) %>%
+  FindClusters(resolution = 0.1) %>%
+  FindClusters(resolution = 0.2) %>%
+  FindClusters(resolution = 0.3) %>%
+  FindClusters(resolution = 0.4) %>%
+  FindClusters(resolution = 0.5) %>%
+  FindClusters(resolution = 0.6) %>%
+  FindClusters(resolution = 0.8) %>%
+  FindClusters(resolution = 10)
+
+```
+
+```{r save integrated object}
+
+saveRDS(sall1_mg, "/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/SALL1_overexpression/sall1_mg_exp1_integrated.rds")
+
+```
+
+# Session info
+```{r session info}
+
+sessionInfo()
+
+```
+
+

@@ -1,0 +1,146 @@
+---
+title: "Pseudotime alignment of microglia"
+author: "Marina Nikolova"
+date: "25/10/2022"
+output: html_document
+---
+
+```{r}
+
+source("/home/marinani/Scripts/Data_analysis/pt_alignment.r")
+
+```
+
+```{r subset cells}
+
+# Subset control microglia
+seurat_ctrl <- subset(seurat, subset = sample %in% c("MG-d3-ctrl", "MG-d15-ctrl", "MG-d30-ctrl", "MG-d58-ctrl")) %>%
+        subset(subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(seurat_ctrl) <- setdiff(VariableFeatures(seurat_ctrl), unlist(cc.genes))
+seurat_ctrl <- CellCycleScoring(seurat_ctrl,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = TRUE)
+seurat_ctrl <- ScaleData(seurat_ctrl, vars.to.regress = c("S.Score", "G2M.Score"))
+seurat_ctrl <- RunPCA(seurat_ctrl) %>% 
+        RunUMAP(reduction="css", dims=1:ncol(Embeddings(seurat_ctrl,"css")), reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 46)
+
+
+# Subset cocultured microglia
+seurat_cocul <- subset(seurat, subset = sample %in% c("MG-d3-cocul", "MG-d15-cocul", "MG-d30-cocul", "MG-d58-cocul")) %>%
+        subset(subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(seurat_cocul) <- setdiff(VariableFeatures(seurat_cocul), unlist(cc.genes))
+seurat_cocul <- CellCycleScoring(seurat_cocul,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = TRUE)
+seurat_cocul <- ScaleData(seurat_cocul, vars.to.regress = c("S.Score", "G2M.Score"))
+seurat_cocul <- RunPCA(seurat_cocul) %>% 
+        RunUMAP(reduction="css", dims=1:ncol(Embeddings(seurat_cocul,"css")), reduction.name="umap_css", reduction.key="UMAPCSS_", seed = 46)
+
+```
+
+```{r run diffusion map}
+
+# Load the destiny package
+library(destiny)
+
+# Run destiny on control
+dm_ctrl <- DiffusionMap(Embeddings(seurat_ctrl, "pca")[,1:20])
+dpt_ctrl <- DPT(dm_ctrl)
+seurat_ctrl$dpt <- rank(-dpt_ctrl$dpt)
+
+# Run destiny on coculture
+dm_cocul <- DiffusionMap(Embeddings(seurat_cocul, "pca")[,1:20])
+dpt_cocul <- DPT(dm_cocul)
+seurat_cocul$dpt <- rank(-dpt_cocul$dpt)
+
+FeaturePlot(seurat_ctrl, "dpt", reduction = "umap_css", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+FeaturePlot(seurat_ctrl, "dpt", reduction = "pca", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+
+FeaturePlot(seurat_cocul, "dpt", reduction = "umap_css", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+FeaturePlot(seurat_cocul, "dpt", reduction = "pca", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+
+
+```
+
+```{r dtw psudotime alignment function}
+
+# install.packages("pdist")
+# install.packages("cobs")
+
+# alignment given expression matrix and pseudotimes of cells in reference trajectory and query trajectories
+align_pt_traj <- function(expr_ref, pt_ref, expr_query, pt_query, # data input
+		num_breaks_ref = 50, num_breaks_query = num_breaks_ref, dist_method = c("cor", "eucl"), degree = 1, # dtw alignment parameters
+		ref_name = "ref", query_name = "query", mode = c("global", "fixed_start", "fixed_end", "partial"), rev = FALSE, # dtw alignment parameters
+		nknots_cobs = 20){ # cobs parameters
+	require(pdist)
+	require(cobs)
+	dist_method <- match.arg(dist_method)
+	mode <- match.arg(mode)
+	
+	average_ref <- t(apply(expr_ref, 1, function(e) tapply(e, ceiling(pt_ref * num_breaks_ref), mean)))
+	average_query <- t(apply(expr_query, 1, function(e) tapply(e, ceiling(pt_query * num_breaks_query), mean)))
+
+	average_diff <- NULL
+	if (dist_method == "cor"){
+		average_diff <- 1-cor(average_query, average_ref)
+	} else if (dist_method == "eucl"){
+		average_diff <- as.matrix(pdist::pdist(t(average_query), t(average_ref)))
+	}
+
+	if (degree > 1)
+		average_diff <- average_diff ^ degree
+	
+	alignment <- align_diff(average_diff, ref_name = ref_name, query_name = query_name, mode = mode, rev = rev)
+	pointwise_constrain <- NULL
+	if (mode == "global"){
+		pointwise_constrain <- rbind(c(0,0,0), c(0,1,1))
+	} else if (mode == "fixed_start"){
+		pointwise_constrain <- rbind(c(0,0,0))
+	} else if (mode == "fixed_end"){
+		pointwise_constrain <- rbind(c(0,1,1))
+	}
+	model <- cobs(x = c(0,alignment$alignment[,1]) / num_breaks_query,
+				  y = c(0,alignment$alignment[,2]) / num_breaks_ref,
+				  constraint= "increase", pointwise=pointwise_constrain, nknots=nknots_cobs)
+	
+	pt_query_aligned <- predict(model, pt_query)[,2]
+	res <- list(alignment = alignment, model = model, pt_query_aligned = pt_query_aligned)
+	return(res)
+}
+
+```
+
+```{r dtw pseudoptime alignment}
+
+# generate a vector with common variable features
+common_vf <- intersect(VariableFeatures(seurat_ctrl), VariableFeatures(seurat_cocul))
+
+# Function from Kanton et al. 2019, https://github.com/quadbiolab/primate_cerebral_organoids/blob/master/pt_alignment.r
+aligned_pt <- align_pt_traj_with_ref(expr_ref = seurat_ctrl@assays$RNA@data[common_vf,], 
+              pt_ref = rank(-dpt_ctrl$dpt), 
+              expr_query = seurat_cocul@assays$RNA@data[common_vf,], 
+              pt_query = rank(-dpt_cocul$dpt),
+		          dist_method = c("spearman"), 
+	            degree = 1,
+		          ref_name = "ref", 
+		          query_name = "query", 
+		          mode = c("fixed_start"), 
+		          rev = FALSE,
+		          nknots_cobs = 20)
+
+```
+
+```{r}
+
+ranked_aligned_pt <- rank(c(setNames(rank(-dpt_ctrl$dpt), colnames(seurat_ctrl)), setNames(aligned_pt$pt_query_aligned, colnames(seurat_cocul)))[colnames(seurat_cocul)])
+
+dist(rbind(ranked_aligned_pt, rank(dpt_ctrl)))
+
+library(gplots)
+heatmap.2(aligned_pt$alignment$diff_mat, col=bluered_colscheme(30), trace="none",Rowv=NA, Colv=NA,dendrogram="none",scale="none", key=F,keysize=0.5)
+
+```

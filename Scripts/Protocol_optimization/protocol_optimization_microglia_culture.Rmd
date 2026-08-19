@@ -1,0 +1,684 @@
+---
+title: "Protocol optimization analysis"
+author: "Marina Nikolova"
+date: "03/11/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_cond_levels <- factor(c("A","B", "C", "D","E", "F", "G","H", "I", "J"))
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#002C3D","#03707E", "#65c1be", "#5F6C25", "#BBA834", "#E7A624", "#CA6702", "#C33708", "#971E1C", "#A74E8D")), mg_cond_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_primary_ct_levels <- factor(c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia", "SOX-hi microglia", "Monocyte", "Perivascular macrophage", "Erythrocyte"))
+# generate color palette based on vintage_cols palette
+col_primary_ct <-setNames(c(rev(rainbow_pastel_cols(9))), mg_primary_ct_levels)
+
+```
+
+```{r load seurat object}
+
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Protocol_optimization/seurat_integrated.rds")
+
+```
+
+#### Calculate cluster markers of all clusters using wilcox.
+```{r find cluster markers}
+
+Idents(seurat) <- "RNA_snn_res.0.3"
+
+table(seurat$condition, seurat$RNA_snn_res.0.3)
+
+cl_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/Protocol_optimization/top_cl_markers.csv")
+write.csv(top50_cl_markers, "Plots/Protocol_optimization/top50_cl_markers.csv")
+
+```
+
+#### Calcualte condition markers of all clusters using wilcox.
+```{r find condition markers}
+
+Idents(seurat) <- "condition"
+
+cond_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cond_markers <- cond_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cond_markers <- cond_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cond_markers <- cond_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cond_markers <- cond_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cond_markers <- cond_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cond_markers, "Plots/Protocol_optimization/top_cond_markers.csv")
+write.csv(top50_cond_markers, "Plots/Protocol_optimization/top50_cond_markers.csv")
+
+```
+
+# Plot basic infromation
+
+#### Plot UMAPs colored by various measures.
+
+```{r plot integrated object}
+
+Idents(seurat) <- "condition"
+
+# plot all cells from all samples
+pdf("Plots/Protocol_optimization/umap_by-condition.pdf", width = 6, height = 4)
+DimPlot(seurat, group.by="condition", reduction="umap_css", cols = vintage_rich_cols(10), pt.size = 0.5) & NoAxes()
+dev.off()
+
+png("Plots/Protocol_optimization/umap_by_condition.png", width = 2600, height = 1900, res = 400)
+DimPlot(seurat, group.by="condition", reduction="umap_css", cols = vintage_rich_cols(10), pt.size = 0.4) & NoAxes()
+dev.off()
+
+
+DimPlot(seurat, group.by="condition", reduction="umap_css", cols = vintage_rich_cols(10)) & NoAxes()
+
+# susbet cells from each sample
+A <- WhichCells(seurat, idents = c("A"))
+B <- WhichCells(seurat, idents = c("B"))
+C <- WhichCells(seurat, idents = c("C"))
+D <- WhichCells(seurat, idents = c("D"))
+E <- WhichCells(seurat, idents = c("E"))
+F <- WhichCells(seurat, idents = c("F"))
+G <- WhichCells(seurat, idents = c("G"))
+H <- WhichCells(seurat, idents = c("H"))
+I <- WhichCells(seurat, idents = c("I"))
+J <- WhichCells(seurat, idents = c("J"))
+
+# plot each sample separately
+png("Plots/Protocol_optimization/umap_by_condition_sep.png", width = 4000, height = 2000, res = 300)
+(DimPlot(seurat, cells.highlight = A,  reduction="umap_css", cols.highlight = c("#002C3D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = B,  reduction="umap_css", cols.highlight = c("#03707E"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = C,  reduction="umap_css", cols.highlight = c("#65c1be"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = D,  reduction="umap_css", cols.highlight = c("#5F6C25"), cols = "lightgray", order = T) & NoAxes() & NoLegend() | 
+DimPlot(seurat, cells.highlight = E,  reduction="umap_css", cols.highlight = c("#BBA834"), cols = "lightgray", order = T) & NoAxes() & NoLegend()) /
+(DimPlot(seurat, cells.highlight = F,  reduction="umap_css", cols.highlight = c("#E7A624"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = G,  reduction="umap_css", cols.highlight = c("#CA6702"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = H,  reduction="umap_css", cols.highlight = c("#C33708"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = I,  reduction="umap_css", cols.highlight = c("#971E1C"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = J,  reduction="umap_css", cols.highlight = c("#A74E8D"), cols = "lightgray", order = T) & NoAxes() & NoLegend())
+dev.off()
+
+# plot by cluster
+png("Plots/Protocol_optimization/umap_by_cluster_res.0.3.png", width = 2400, height = 1900, res = 400)
+DimPlot(seurat, reduction="umap_css",  group.by="RNA_snn_res.0.3", cols = rev(rainbow_pastel_cols(8)), pt.size = 0.5) & NoAxes()
+dev.off()
+
+```
+
+
+#### Plot cluster markers.
+```{r heatmap top markers by cluster, fig.height=7, fig.width=4}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "RNA_snn_res.0.3"
+
+avgexp <- AverageExpression(seurat, return.seurat = T)
+
+pdf("Plots/Protocol_optimization/heatmap_top10_markers_cluster.pdf", width = 5, height = 15)
+DoHeatmap(avgexp, features = top10_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = rev(rainbow_pastel_cols(7))) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+pdf("Plots/Protocol_optimization/heatmap_top50_markers_cluster.pdf", width = 5, height = 40)
+DoHeatmap(avgexp, features = top50_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = rev(rainbow_pastel_cols(7))) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+library(gplots)
+avg_cond_cl <- sapply(levels(seurat$RNA_snn_res.0.3), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_snn_res.0.3==x)]))
+# scale the data as 0 to 1 (instead)
+
+# top 2 markers
+col.order <- top2_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top2_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Protocol_optimization/heatmap_scaled_top2_markers_cluster.pdf", width = 7, height = 8)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col = colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# top 10 markers
+col.order <- top10_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top10_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Protocol_optimization/heatmap_scaled_top10_markers_clustere.pdf", width = 7, height = 20)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# top 50 markers
+col.order <- top50_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top50_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Protocol_optimization/heatmap_scaled_top50_markers_celltype.pdf", width = 7, height = 26)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=0.5, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+#### Plot markers
+Generate plots with markers of various clusters
+```{r feature plots}
+
+DefaultAssay(seurat) <- "RNA"
+
+genes <- c("PTPRC", "SPP1", "AIF1", "CX3CR1", "RUNX1", "SPI1", "CSF1R", "AXL", "P2RY12", "SALL1", "TREM2")
+genes2 <- c("MERTK", "HOXB2", "MEF2C", "MYB", "P2RY13", "SPI1", "CLEC7A", "ITGAX", "TGFB1", "TGFBR1", "TMEM119")
+markers <- c("C3", "EGR1", # remodelling microglia
+             "CXCL5", "IL7R", # inflammatory microglia
+              "F13A1", "MRC1", # resting microglia or brain-associated microgphages
+              "APOC1", "ACP5", # lipid-associated microglia
+              "MKI67", "TOP2A", # proliferating
+              "TPM2", "ACTA2", # smooth muscle cell
+              "SOX4", "MAP1B" # neuron 
+                )
+
+
+png("Plots/Protocol_optimization/feature_plot_microglia_genes.png",  width = 6000, height = 4500, res = 500)
+FeaturePlot(seurat, features = genes, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol = 4, reduction = "umap_css") & NoAxes() & NoLegend()
+dev.off()
+
+png("Plots/Protocol_optimization/feature_plot_microglia_genes2.png",  width = 6000, height = 4500, res = 500)
+FeaturePlot(seurat, features = genes2, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol = 4, reduction = "umap_css") & NoAxes() & NoLegend()
+dev.off()
+
+png("Plots/Protocol_optimization/feature_plot_celltype_markers.png",  width = 6000, height = 6000, res = 500)
+FeaturePlot(seurat, features = markers, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol=4, reduction = "umap_css") & NoAxes() & NoLegend()
+dev.off()
+
+```
+
+```{r plot BAM PAM DAM DIM markers}
+
+# Markers
+BAM <- c("LYVE1","MS4A7","MRC1","FCNA","CD74","IRF7","TTR","CLEC7A","CSF1R","IGF8","ITGB1","MAF","MAFB","NOTCH3","RUNX1","TGFB1","TLN1","CD36","CD163","CD169","CD38")
+microglia <- c("P2RY12","GPR34","SALL1","HEXB","FCRL2","TMEM119","OLFML3","SOCS3","TREM2","CX3CR1","SLC2A5","CRYBB1","SIGLECH","GPR84","FCRLS","P2RY13","ITGB5","ANXA3")
+DIM <- toupper(c("Atf3","Btg2","Ccl4","Ctss","Dusp1","Egr1","Fos","Icam1","Ier2","Ier5","Il1a","Il1b","Itga6","Jun","Junb","Klf6","Tnf","Zfp36","Cd83","Fosb","CD14","FTH1","NFKBIA","NFKBIZ","AXL","CSF2RA","EIF1","PLAUR","SAT1"))
+PAM <- toupper(c("Cst7","Ccl3","Igf1","Spp1","Apoe","Ctsd","Ctsb","Lpl","Tyrobp","Cd9","Fth1","Ctsz","Cd63","Ctsl","Ctsa","Clec7a","Gpnmb","Fabp5","Ftl1","Sepp1","Cyba"))
+embryonic_microglia <- toupper(c("Mtap1b","Gpx3","Ldha","Aldoa","Pkm2","Meg3","Npm1","Ftl1","Eif5a","Mif","Eef1a1","Cfl1","Tmsb4x","Rps19","Rn45s","Actb","Rpl13","Evl","Ikzf1","Rabac1","Man2b1","Cd84"))
+
+# Plots
+pdf("Plots/Protocol_optimization/dotpt_markers_BAM.pdf")
+DotPlot(seurat, features = BAM, group.by = "condition") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Protocol_optimization/dotpt_markers_microglia.pdf")
+DotPlot(seurat, features = microglia, group.by = "condition") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Protocol_optimization/dotpt_markers_DIM.pdf")
+DotPlot(seurat, features = DIM, group.by = "condition") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Protocol_optimization/dotpt_markers_PAM.pdf")
+DotPlot(seurat, features = PAM, group.by = "condition") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Protocol_optimization/dotpt_markers_embryonic_microglia.pdf")
+DotPlot(seurat, features = embryonic_microglia, group.by = "condition") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+```
+
+
+```{r stacked violing plot function}
+
+library(Seurat)
+library(ggplot2)
+
+## remove the x-axis text and tick 
+## plot.margin to adjust the white space between each plot.
+## ... pass any arguments to VlnPlot in Seurat
+modify_vlnplot<- function(obj, 
+feature, 
+pt.size = 0,
+plot.margin = margin(0, 0, 0, 0, "cm"),
+...) {
+p<- VlnPlot(obj, features = feature, pt.size = pt.size, ... )+
+ylab(feature) + 
+theme(legend.position = "none",
+plot.title= element_blank(),
+axis.title.x = element_blank(),
+axis.text.x = element_blank(), 
+axis.ticks.x = element_blank(), 
+axis.title.y = element_text(size = rel(1), angle = 0), 
+axis.text.y = element_text(size = rel(1)), 
+plot.margin = plot.margin ) 
+return(p)
+}
+
+
+## extract the max value of the y axis
+extract_max<- function(p){
+  ymax<- max(ggplot_build(p)$layout$panel_scales_y[[1]]$range$range)
+  return(ceiling(ymax))
+}
+
+
+## main function
+StackedVlnPlot<- function(obj, features,
+                          pt.size = 0, 
+                          plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
+                          ...) {
+  
+  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
+  
+  # Add back x-axis title to bottom plot. patchwork is going to support this?
+  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
+    theme(axis.text.x=element_text(angle = 45, hjust = 1, vjust = 1), 
+          axis.ticks.x = element_line())
+  
+  # change the y-axis tick to only max value 
+  ymaxs<- purrr::map_dbl(plot_list, extract_max)
+  plot_list<- purrr::map2(plot_list, ymaxs, function(x,y) x + 
+                            scale_y_continuous(breaks = c(y)) + 
+                            expand_limits(y = y))
+  
+  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1)
+  return(p)
+}
+
+```
+
+
+```{r stacked vln plot marker genes microglia per cluster}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "RNA_snn_res.0.3"
+
+pdf("Plots/Protocol_optimization/vlnpt_top2_markers_cl.pdf", width = 7.5, height = 6)
+StackedVlnPlot(obj = seurat, features = top2_cl_markers$gene, cols = rev(rainbow_pastel_cols(8))) 
+dev.off()
+
+png("Plots/Protocol_optimization/vlnpt_top2_markers_cl.png",  width = 2700, height = 2100, res = 400)
+StackedVlnPlot(obj = seurat, features = top2_cl_markers$gene, cols = rev(rainbow_pastel_cols(8))) 
+dev.off()
+
+pdf("Plots/Protocol_optimization/dotpt_top2_markers_cl_and_others.pdf", width = 8, height = 4)
+DotPlot(seurat, features = c(unique(top2_cl_markers$gene), "AIF1", "PTPRC", "CSF1R", "HEXB", "CX3CR1","TMEM119", "P2RY12",  "APOE"), group.by = "RNA_snn_res.0.3") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+png("Plots/Protocol_optimization/dotpt_top2_markers_cl_and_others.png", width = 3600, height = 1500, res = 400)
+DotPlot(seurat, features = c(unique(top2_cl_markers$gene), "AIF1", "PTPRC", "CSF1R", "HEXB", "CX3CR1","TMEM119", "P2RY12",  "APOE"), group.by = "RNA_snn_res.0.3") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+```
+
+```{r stacked vln plot marker genes microglia per condition}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "condition"
+
+pdf("Plots/Protocol_optimization/vlnpt_top2_markers_cond.pdf", width = 7.5, height = 6)
+StackedVlnPlot(obj = seurat, features = top2_cond_markers$gene, cols = col_sample) 
+dev.off()
+
+png("Plots/Protocol_optimization/vlnpt_top2_markers_cond.png",  width = 2700, height = 2100, res = 400)
+StackedVlnPlot(obj = seurat, features = top2_cond_markers$gene, cols = col_sample) 
+dev.off()
+
+pdf("Plots/Protocol_optimization/dotpt_top2_markers_cond_and_others.pdf", width = 8, height = 4)
+DotPlot(seurat, features = c(unique(top2_cond_markers$gene), "AIF1", "PTPRC", "CSF1R", "HEXB", "CX3CR1","TMEM119", "P2RY12",  "APOE"), group.by = "condition") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+png("Plots/Protocol_optimization/dotpt_top2_markers_cond_and_others.png", width = 3600, height = 1500, res = 400)
+DotPlot(seurat, features = c(unique(top2_cond_markers$gene), "AIF1", "PTPRC", "CSF1R", "HEXB", "CX3CR1","TMEM119", "P2RY12",  "APOE"), group.by = "condition") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        prct = unlist(lapply(genes,calc_helper, object=object))
+        result = data.frame(Markers = genes, Cell_proportion = prct)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes=genes)
+        for(i in 1:length(factors)){
+        results[[i]]$Feature = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_helper <- function(object,genes){
+    counts = object[['RNA']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells
+    }else{return(NA)}
+}
+
+
+```
+
+#### Plot proportions of cells per cluster and protocol.
+```{r plot cell proportions}
+
+DefaultAssay(seurat) <- "RNA"
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$condition))
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Cluster"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Condition"
+
+# Stacked condition poer cluster
+pdf("Plots/Protocol_optimization/prop_condition_per_cluster.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Condition, y=Freq, x=Cluster)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cluster") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= col_sample) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+# Stacked cluster per condition
+pdf("Plots/Protocol_optimization/prop_cluster_per_condition.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Cluster, y=Freq, x=Condition)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Condition") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= rev(rainbow_pastel_cols(8))) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$condition))
+cells_cl$Var2 <- factor(x = cells_cl$Var2, levels = c("all"))
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Cluster"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Condition"
+
+# Stacked
+pdf("Plots/Protocol_optimization/prop_all_cells_per_cluster.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Cluster, y=Freq, x="")) +
+    geom_bar(position="fill", stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cluster") +
+    ylab("Proporion of cells") +
+    scale_fill_manual(values = rev(rainbow_pastel_cols(8))) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$RNA_snn_res.0.3, seurat$condition))
+cells_cl$Var1 <- factor(x = cells_cl$Var1, levels = c("all"))
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Cluster"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Condition"
+
+# Stacked
+pdf("Plots/Protocol_optimization/prop_all_cells_per_condition.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Condition, y=Freq, x="")) +
+    geom_bar(position="fill", stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cluster") +
+    ylab("Proporion of cells") +
+    scale_fill_manual(values = col_sample) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+# Comparison to primary microglia
+
+#### Compare to primary fetal microglai from Kracht et al. 2020
+
+```{r load and prepare primary microglia Kracht}
+
+## logCP10k-primary vs. logUMInorm-organoid
+load("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Kracht_Science_2020_human_fetal_microglia_scRNAseq_ATACseq/niches_avgExpr_meta.RData")
+load("Objects/Kracht_primary_microglia/niches_microglia_only_avgExpr_meta.RData")
+
+## Load primary fetal microglia
+seurat_MG <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Kracht_Science_2020_human_fetal_microglia_scRNAseq_ATACseq/seurat.rds")
+seurat_MG_only <- readRDS("Objects/Kracht_primary_microglia/seurat_microglia_only.rds")
+
+# Load uwot model
+umap_model <- load_uwot(file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/kracht_uwot_model_pca.uwot")
+umap_model_MG_only <- load_uwot(file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Kracht_primary_microglia/uwot_model_microglia_only_pca.uwot")
+
+```
+
+```{r name celltypes in kracht microglia}
+
+Idents(seurat_MG) <- "celltype"
+seurat_MG$celltype  <- factor(setNames(c("Erythrocyte",
+           "Monocyte",
+           "Perivascular macrophage",
+           "SOX-hi microglia",
+           "SOX-medium microglia",
+           "Proliferating microglia",
+           "Homeostatic microglia (early)",
+           "Homeostatic microglia (late)",
+            "Activated microglia",
+           "Activated microglia"), levels(seurat_MG@active.ident))[seurat_MG@active.ident])
+
+```
+
+#### Seurat-based label transfer
+```{r Seurat-based label transfer}
+
+seurat <- FindVariableFeatures(seurat)
+seurat_MG <- FindVariableFeatures(seurat_MG)
+
+# Perform Seurat label transfer for projection of the reference onto the query (iPSC-dervied) microglia
+# Find anchors
+anchors <- FindTransferAnchors(reference = seurat_MG, query = seurat, dims = 1:50, npcs = 50, reduction = "rpca", k.filter = NA,verbose = F)
+# Transfer the categorical information across the two datasets as predict.id
+# Seurat does not correct or modify the query expression data
+# Label transfer based on timepoint
+predictions <- TransferData(anchorset = anchors, query = seurat,refdata = as.character(seurat_MG$timepoint_wks), dims = 1:50, weight.reduction = "pca") # project the PCA structure of the reference onto the query by default (this can be changed with the weight.reduction parameter). TransferData returns a matrix with predicted IDs and prediction scores, which we can add to the query metadata.
+seurat$timepoint_wks_transfer <- predictions$predicted.id
+
+
+# Label transfer based on cell type
+predictions <- TransferData(anchorset = anchors, query = seurat, refdata = as.character(seurat_MG$celltype), dims = 1:50, weight.reduction = "pca")
+seurat$celltype_transfer <- predictions$predicted.id
+
+# Order metadata levels
+levels_primary_wks <- factor(c(9, 10, 11, 12, 13, 15, 16, 17, 18))
+seurat_MG$timepoint_wks <- factor(seurat_MG$timepoint_wks, levels = levels_primary_wks)
+seurat$timepoint_wks_transfer <- factor(seurat$timepoint_wks_transfer, levels = levels_primary_wks)
+
+# Plot the label transfer by timepoint
+pdf("Plots/Protocol_optimization/transfer_kracht_by_week.pdf",  width = 6, height = 5)
+DimPlot(seurat, group.by="timepoint_wks_transfer", reduction="umap_css", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+png("Plots/Protocol_optimization/transfer_kracht_by_week.png",  width = 2700, height = 2600, res = 500)
+DimPlot(seurat, group.by="timepoint_wks_transfer", reduction="umap_css", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+
+
+# Plot the label transfer by cell type
+pdf("Plots/Protocol_optimization/transfer_kracht_by_celltype.pdf",  width = 7, height = 5)
+DimPlot(seurat, group.by="celltype_transfer", reduction="umap_css", pt.size = 0.6, cols = col_primary_ct) & NoAxes()
+dev.off()
+png("Plots/Protocol_optimization/transfer_kracht_by_celltype.png",  width = 3200, height = 2600, res = 500)
+DimPlot(seurat, group.by="celltype_transfer", reduction="umap_css", pt.size = 0.6, cols =  col_primary_ct) & NoAxes()
+dev.off()
+
+Idents(seurat) <- "celltype_transfer"
+# susbet cells from each sample
+hme <- WhichCells(seurat, idents = c("Homeostatic microglia (early)"))
+hml <- WhichCells(seurat, idents = c("Homeostatic microglia (late)"))
+am <- WhichCells(seurat, idents = c("Activated microglia"))
+pm <- WhichCells(seurat, idents = c("Proliferating microglia"))
+er <- WhichCells(seurat, idents = c("Erythrocyte"))
+sm <- WhichCells(seurat, idents = c("SOX-medium microglia"))
+mo <- WhichCells(seurat, idents = c("Monocyte"))
+pem <- WhichCells(seurat, idents = c("Perivascular macrophage"))
+
+# plot each sample separately
+png("Plots/Protocol_optimization/umap_by_celltype_transfer.png", width = 4500, height = 2600, res = 400)
+(DimPlot(seurat, cells.highlight = hme,  reduction="umap_css", cols.highlight = c("#9A5C6B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = hml,  reduction="umap_css", cols.highlight = c("#5F718B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() | 
+DimPlot(seurat, cells.highlight = am,  reduction="umap_css", cols.highlight = c("#41867A"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = pm,  reduction="umap_css", cols.highlight = c("#5C9160"), cols = "lightgray", order = T) & NoAxes() & NoLegend()) / 
+(DimPlot(seurat, cells.highlight = sm,  reduction="umap_css", cols.highlight = c("#ACA64D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mo,  reduction="umap_css", cols.highlight = c("#DD862C"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = pem,  reduction="umap_css", cols.highlight = c("#DA6835"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = er,  reduction="umap_css", cols.highlight = c("#DD4345"), cols = "lightgray", order = T) & NoAxes() & NoLegend()
+)
+dev.off()
+
+```
+
+#### Plot proportions of cells per condition transfered from kracht et al.
+```{r plot cell proportions transfered from primary data}
+
+DefaultAssay(seurat) <- "RNA"
+
+# create a dataset
+cells_cond <- as.data.frame(table(seurat$condition, seurat$celltype_transfer))
+cells_cond$Var1 <- factor(x = cells_cond$Var1, levels = mg_cond_levels)
+cells_cond$Var2 <- factor(x = cells_cond$Var2, levels = mg_primary_ct_levels)
+
+colnames(cells_cond)[which(names(cells_cond) == "Var1")] <- "Condition"
+colnames(cells_cond)[which(names(cells_cond) == "Var2")] <- "Celltype"
+
+# Stacked
+pdf("Plots/Protocol_optimization/prop_transferred_cells_per_condition.pdf",  width = 6, height = 8)
+ggplot(cells_cond, aes(fill=Celltype, y=Freq, x=Condition)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Condition") + 
+    ylab("Transferred celltype") +
+    scale_fill_manual(values= col_primary_ct) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+# create a dataset
+cells_cond <- as.data.frame(table(seurat$condition, seurat$timepoint_wks_transfer))
+cells_cond$Var1 <- factor(x = cells_cond$Var1, levels = mg_cond_levels)
+cells_cond$Var2 <- factor(x = cells_cond$Var2, levels = levels_primary_wks)
+
+colnames(cells_cond)[which(names(cells_cond) == "Var1")] <- "Condition"
+colnames(cells_cond)[which(names(cells_cond) == "Var2")] <- "Timepoint"
+
+# Stacked
+pdf("Plots/Protocol_optimization/prop_transferred_cells_per_condition.pdf",  width = 6, height = 8)
+ggplot(cells_cond, aes(fill=Timepoint, y=Freq, x=Condition)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Condition") + 
+    ylab("Transferred celltype") +
+    #scale_fill_manual(values= c("#002C3D", "#41ACA5", "#749461", "#9C941B","#E69000", "#BF2E0C")) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+```
+
+
+```{r similarity spectrum to reference}
+
+# Calculate Reference Similarity Spectrum (RSS), given expression of the data and expression of the meta niches of the primary fetal microglia
+sim2_MG_niches <- ref_sim_spectrum(seurat@assays$RNA@data, avg_expr_niches[vargenes_niches,], scale=F)
+dimnames(sim2_MG_niches) <- list(colnames(seurat), colnames(avg_expr_niches))
+cols_MG_ct <- setNames(c("#A569BD","#E59866","#E74C3C","#F4D03F","#82E0AA","#5DADE2","#52BE80","#27AE60","#48C9B0","#17A589"), levels(meta_niches$celltype))
+
+# plot similarity to the primary microglia similarity spectrum score
+png("Plots/Protocol_optimization/css_similarity_to_primary_umap.png", width = 2400, height = 1900, res = 400)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(seurat,"umap_css"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+pdf("Plots/Protocol_optimization/css_similarity_to_primary_umap.pdf", width = 4, height = 4)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(seurat,"umap_css"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+# max sim 0.6756897
+# min sim  -0.02729112
+
+library("vioplot")
+# plot the similarity to primary microglia as a score as a boxplot
+idx_MG <- which(!seurat@active.ident %in% as.character(6:9))
+pdf("Plots/Protocol_optimization/css_similarity_to_primary_boxplot.pdf", width = 7, height = 4)
+par(mar=c(10,5,1,1)); boxplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], seurat$condition[idx_MG], list), las=2, frame=F, pch=21, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = col_sample, outcex = 0.2)
+dev.off()
+pdf("Plots/Protocol_optimization/css_similarity_to_primary_vlnplot.pdf", width = 7, height = 4)
+par(mar=c(10,5,1,1)); vioplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], seurat$condition[idx_MG], list), las=2, frame=F, pch=19, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = col_sample)
+dev.off()
+
+avg_expr_highres <- sapply(levels(seurat$RNA_snn_res.10), function(cl) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_snn_res.10==cl)]))
+sim2_highres <- ref_sim_spectrum(seurat@assays$RNA@data, avg_expr_highres[intersect(vargenes_niches,rownames(avg_expr_highres)),], scale=F)
+summary(apply(sim2_highres,1,max)[idx_MG])
+
+```
+
+
+#### Add am odule score for activation or homeostasis to in vitro microglia based on kracht culture
+```{r module score}
+
+top50_ct_markers_kracht <- read.csv("Plots/Co-culture_timecourse/top50_ct_markers_kracht_renamed_ct.csv")
+activated <- top50_ct_markers_kracht %>% group_by(cluster) %>%  filter(cluster == "Activated microglia")
+homeostatic_late <- top50_ct_markers_kracht %>% group_by(cluster) %>%  filter(cluster == "Homeostatic microglia (late)") %>% filter(gene != c("RNA5SP151"))
+
+seurat <- AddModuleScore(object = seurat, features = activated$gene, ctrl = 50, name = 'activated') 
+seurat <- AddModuleScore(object = seurat, features = homeostatic_late$gene, ctrl = 50, name = 'homeostatic_late')
+
+png("Plots/Protocol_optimization/dotpt_homeostatic_activated_score.png", width = 2000, height = 1500, res = 400)
+DotPlot(object = seurat, features = c('homeostatic_late1','activated1'), group.by = "condition") + scale_colour_gradientn(colours = bluered_colscheme(8))
+dev.off()
+pdf("Plots/Protocol_optimization/dotpt_homeostatic_activated_score.pdf", width = 6, height = 4)
+DotPlot(object = seurat, features = c('homeostatic_late1','activated1'), group.by = "condition") + scale_colour_gradientn(colours = bluered_colscheme(8))
+dev.off()
+
+png("Plots/Protocol_optimization/featureplot_homeostatic_activated_score.png", width = 2800, height = 1300, res = 400)
+(FeaturePlot(object = seurat, features = 'homeostatic_late1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) | FeaturePlot(object = seurat, features = 'activated1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) ) & NoAxes()
+dev.off()
+pdf("Plots/Protocol_optimization/featureplot_homeostatic_activated_score.pdf", width = 12, height = 6)
+(FeaturePlot(object = seurat, features = 'homeostatic_late1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) | FeaturePlot(object = seurat, features = 'activated1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) ) & NoAxes()
+dev.off()
+
+```
+

@@ -1,0 +1,920 @@
+---
+title: "Analysis of microglia co-culture timecourse "
+author: "Marina Nikolova"
+date: "20/10/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+library(ggrepel)
+library(uwot)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+source("/home/marinani/Scripts/Data_analysis/r_util.r")
+source("/home/marinani/Scripts/Data_analysis/differential_expression.r")
+
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_cocult_levels <- factor(c("MG-d3-ctrl","MG-d15-ctrl","MG-d30-ctrl","MG-d58-ctrl", "MG-d3-cocul","MG-d15-cocul", "MG-d30-cocul","MG-d58-cocul"))
+# generate color palette based on vintage_cols palette
+col_sample <-setNames(c(c("#94D2BD","#58B6AC", "#026D7D", "#002C3D", "#D9BE6D", "#E69000", "#C73E04", "#861D21")), mg_cocult_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+my_levels <- factor(c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia", "smooth muscle cell","neuron"))
+# generate color palette based on vintage_cols palette
+col_ct <-setNames(c(rev(pastel_contrast_cols(7))), my_levels)
+
+# reorder the samples in the metadata to appear in the order desired by us
+mg_primary_ct_levels <- factor(c("Homeostatic microglia (early)", "Homeostatic microglia (late)", "Activated microglia", "Proliferating microglia", "SOX-medium microglia", "SOX-hi microglia", "Monocyte", "Perivascular macrophage", "Erythrocyte"))
+# generate color palette based on vintage_cols palette
+col_primary_ct <-setNames(c(rev(rainbow_pastel_cols(9))), mg_primary_ct_levels)
+
+```
+
+```{r load seurat object}
+
+seurat <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/microglia_d3_d15_d30_d58_integrated.rds")
+
+```
+
+
+```{r find cluster markers}
+
+Idents(seurat) <- "RNA_snn_res.0.3"
+
+table(seurat$sample, seurat$RNA_snn_res.0.3)
+
+cl_markers <- FindAllMarkers(seurat, min.pct = 0.25, logfc.threshold = log(1.2))
+  
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/Co-culture_timecourse/top_cl_markers.csv")
+write.csv(top50_cl_markers, "Plots/Co-culture_timecourse/top50_cl_markers.csv")
+
+```
+
+#### Name clusters
+```{r name clusters}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "RNA_snn_res.0.3"
+
+seurat$celltype <- factor(setNames(c("remodelling microglia", # 0 almost the same as 3; most similar to cl5 from Kracht et al., peaks at GW 13 and 18; CCL4L2, CCL3L1, CCL3, CCL4, FOS, EGR1, C3
+                                     "inflammatory microglia", # 1 almost the same as 2; CXCL5, CCL2, CCL13, CCL7, IL7R high (https://jneuroinflammation.biomedcentral.com/articles/10.1186/s12974-015-0474-6 and https://onlinelibrary.wiley.com/doi/10.1111/jnc.14313)
+                                     "resting microglia", # 2 almost the same as 1; F13A1, S100A9, CCL13, MMP9, CCL2, MRC1 high; MRC1 and F13A1 are markers of brain-associated macrophages https://www.sciencedirect.com/science/article/pii/S2211124717319034?via%3Dihub
+                                     "remodelling microglia", # 3 almsot the same as 0; EGR1 and C3 high, https://www.frontiersin.org/articles/10.3389/fncel.2019.00453/full
+                                     "lipid associated microglia", # 4 lipid associated, high in APOC1, ACP5, APOE, TREM2, CHI3L (https://aacrjournals.org/cancerres/article/82/18/3291/709018/Lipid-Associated-Macrophages-Are-Induced-by-Cancer)
+                                     "proliferating microglia", # 5 MKI67, TOP2A, HIST1H4C, CENPF high
+                                     "neuron", # 6 SOX4, MAP1B, DCX, TUBA1A, TUBB2B high
+                                     "proliferating microglia", # 7 MKI67, TOP2A, HIST1H4C, CENPF high
+                                     "smooth muscle cell", # 8
+                                     "neuron" # 9 SOX4, MAP1B, DCX, TUBA1A, TUBB2B high
+                                     ), levels(seurat@active.ident))[seurat@active.ident])
+my_levels <- factor(c("remodelling microglia",
+                                     "inflammatory microglia", 
+                                     "resting microglia",
+                                     "lipid associated microglia", 
+                                     "proliferating microglia",
+                                     "smooth muscle cell", 
+                                     "neuron"))
+
+Idents(seurat) <- "celltype"
+seurat$celltype <- factor(seurat$celltype, levels = my_levels)
+
+pdf("Plots/Co-culture_timecourse/umap_by_celltype.pdf", width = 6, height = 4)
+DimPlot(seurat, reduction = "umap_css", group.by = "celltype",pt.size = 0.5, label=F, cols=rev(rainbow_pastel_cols(7))) & NoAxes()
+dev.off()
+    
+png("Plots/Co-culture_timecourse/umap_by_celltype.png", width = 2800, height = 1900, res = 400)
+DimPlot(seurat, group.by="celltype", reduction="umap_css", cols = rev(rainbow_pastel_cols(7)), pt.size = 0.4) & NoAxes()
+dev.off()
+
+```
+
+#### Recalcualte cluster markers of all clusters using wilcox.
+```{r find cluster markers of cell types}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "celltype"
+
+cl_markers <- FindAllMarkers(seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = log(1.2))
+top2_cl_markers <- cl_markers %>% group_by(cluster) %>% slice_max(n = 2, order_by = avg_log2FC)
+top5_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 5, order_by = avg_log2FC)
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 10, order_by = avg_log2FC)
+top50_cl_markers <- cl_markers %>% group_by(cluster) %>%  slice_max(n = 50, order_by = avg_log2FC)
+
+top_cl_markers <- cl_markers %>%
+    group_by(cluster) %>%
+     arrange(desc(avg_log2FC), .by_group = TRUE)
+
+write.csv(top_cl_markers, "Plots/Co-culture_timecourse/top_cl_markers_celltype.csv")
+write.csv(top50_cl_markers, "Plots/Co-culture_timecourse/top50_cl_markers_celltype.csv")
+
+```
+
+
+# Plot basic infromation
+
+#### Plot UMAPs colored by various measures.
+
+```{r plot integrated object}
+
+Idents(seurat) <- "sample"
+
+# plot all cells from all samples
+pdf("Plots/Co-culture_timecourse/umap_by_sample.pdf", width = 6, height = 4)
+DimPlot(seurat, group.by="sample", reduction="umap_css", cols = col_sample, pt.size = 0.5) & NoAxes()
+dev.off()
+
+png("Plots/Co-culture_timecourse/umap_by_sample.png", width = 2600, height = 1900, res = 400)
+DimPlot(seurat, group.by="sample", reduction="umap_css", cols = col_sample, pt.size = 0.4) & NoAxes()
+dev.off()
+
+
+DimPlot(seurat, group.by="sample", reduction="umap_css", cols = col_sample) & NoAxes()
+
+# susbet cells from each sample
+mg_d3_ctrl <- WhichCells(seurat, idents = c("MG-d3-ctrl"))
+mg_d15_ctrl <- WhichCells(seurat, idents = c("MG-d15-ctrl"))
+mg_d30_ctrl <- WhichCells(seurat, idents = c("MG-d30-ctrl"))
+mg_d58_ctrl <- WhichCells(seurat, idents = c("MG-d58-ctrl"))
+mg_d3_cocul <- WhichCells(seurat, idents = c("MG-d3-cocul"))
+mg_d15_cocul <- WhichCells(seurat, idents = c("MG-d15-cocul"))
+mg_d30_cocul <- WhichCells(seurat, idents = c("MG-d30-cocul"))
+mg_d58_cocul <- WhichCells(seurat, idents = c("MG-d58-cocul"))
+
+# plot each sample separately
+png("Plots/Co-culture_timecourse/umap_by_sample_sep.png", width = 4000, height = 2000, res = 300)
+(DimPlot(seurat, cells.highlight = mg_d3_ctrl,  reduction="umap_css", cols.highlight = c("#94D2BD"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d15_ctrl,  reduction="umap_css", cols.highlight = c("#58B6AC"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d30_ctrl,  reduction="umap_css", cols.highlight = c("#026D7D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d58_ctrl,  reduction="umap_css", cols.highlight = c("#002C3D"), cols = "lightgray", order = T) & NoAxes() & NoLegend()) / 
+(DimPlot(seurat, cells.highlight = mg_d3_cocul,  reduction="umap_css", cols.highlight = c("#D9BE6D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d15_cocul,  reduction="umap_css", cols.highlight = c("#E69000"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d30_cocul,  reduction="umap_css", cols.highlight = c("#C73E04"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mg_d58_cocul,  reduction="umap_css", cols.highlight = c("#861D21"), cols = "lightgray", order = T) & NoAxes() & NoLegend())
+dev.off()
+
+# plot by cluster
+png("Plots/Co-culture_timecourse/umap_by_cluster_res.0.3.png", width = 2400, height = 1900, res = 400)
+DimPlot(seurat, reduction="umap_css",  group.by="RNA_snn_res.0.3", cols = rev(rainbow_pastel_cols(10)), pt.size = 0.5) & NoAxes()
+dev.off()
+
+```
+#### Plot cell number per sample
+```{r cell number}
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$sample))
+cells_cl$Var1 <- factor(x = cells_cl$Var1, levels = mg_cocult_levels)
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Sample"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/no_cells_per_sample.pdf",  width = 12, height = 6)
+ggplot(cells_cl, aes(fill=Sample, y=Freq, x=Sample)) +
+    geom_bar( stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cell type") +
+    ylab("iMGL cell number") +
+    scale_fill_manual(values = col_sample) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+#### Plot cluster markers.
+```{r heatmap top markers by cluster, fig.height=7, fig.width=4}
+
+# top5_cl_markers <- top5_cl_markers %>% arrange(factor(cluster, levels = my_levels))
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "celltype"
+
+avgexp <- AverageExpression(seurat, return.seurat = T)
+
+pdf("Plots/Co-culture_timecourse/heatmap_top10_markers_celltype.pdf", width = 5, height = 15)
+DoHeatmap(avgexp, features = top10_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = rev(rainbow_pastel_cols(7))) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/heatmap_top50_markers_celltype.pdf", width = 5, height = 40)
+DoHeatmap(avgexp, features = top50_cl_markers$gene, raster=FALSE, draw.lines = FALSE, size=3, group.colors = rev(rainbow_pastel_cols(7))) + scale_fill_gradientn(colors = c("white", "black"))
+dev.off()
+
+library(gplots)
+avg_cond_cl <- sapply(levels(seurat$celltype), function(x) rowMeans(seurat@assays$RNA@data[,which(seurat$celltype==x)]))
+# scale the data as 0 to 1 (instead)
+
+# top 2 markers
+col.order <- top2_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top2_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Co-culture_timecourse/heatmap_scaled_top2_markers_celltype.pdf", width = 7, height = 8)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col = colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# top 10 markers
+col.order <- top10_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top10_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Co-culture_timecourse/heatmap_scaled_top10_markers_celltype.pdf", width = 7, height = 20)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=1, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+# top 50 markers
+col.order <- top50_cl_markers$gene
+mat_norm <- apply(avg_cond_cl[top50_cl_markers$gene,], 1, function(x) (x-min(x,na.rm=T))/(max(x,na.rm=T)-min(x,na.rm=T)))
+mat_norm <- mat_norm[,col.order]
+pdf("Plots/Co-culture_timecourse/heatmap_scaled_top50_markers_celltype.pdf", width = 7, height = 26)
+heatmap.2(t(mat_norm), Colv=NA, Rowv = NA, trace="none", scale="none", margins=c(7,9), cexRow=0.5, cexCol=1, col =  colorRampPalette(c("white", "black"))(91), key=T, keysize = 2, density.info = "none") 
+dev.off()
+
+```
+
+```{r stacked violing plot function}
+
+library(Seurat)
+library(ggplot2)
+
+## remove the x-axis text and tick 
+## plot.margin to adjust the white space between each plot.
+## ... pass any arguments to VlnPlot in Seurat
+modify_vlnplot<- function(obj, 
+feature, 
+pt.size = 0,
+plot.margin = margin(0, 0, 0, 0, "cm"),
+...) {
+p<- VlnPlot(obj, features = feature, pt.size = pt.size, ... )+
+ylab(feature) + 
+theme(legend.position = "none",
+plot.title= element_blank(),
+axis.title.x = element_blank(),
+axis.text.x = element_blank(), 
+axis.ticks.x = element_blank(), 
+axis.title.y = element_text(size = rel(1), angle = 0), 
+axis.text.y = element_text(size = rel(1)), 
+plot.margin = plot.margin ) 
+return(p)
+}
+
+
+## extract the max value of the y axis
+extract_max<- function(p){
+  ymax<- max(ggplot_build(p)$layout$panel_scales_y[[1]]$range$range)
+  return(ceiling(ymax))
+}
+
+
+## main function
+StackedVlnPlot<- function(obj, features,
+                          pt.size = 0, 
+                          plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
+                          ...) {
+  
+  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
+  
+  # Add back x-axis title to bottom plot. patchwork is going to support this?
+  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
+    theme(axis.text.x=element_text(angle = 45, hjust = 1, vjust = 1), 
+          axis.ticks.x = element_line())
+  
+  # change the y-axis tick to only max value 
+  ymaxs<- purrr::map_dbl(plot_list, extract_max)
+  plot_list<- purrr::map2(plot_list, ymaxs, function(x,y) x + 
+                            scale_y_continuous(breaks = c(y)) + 
+                            expand_limits(y = y))
+  
+  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1)
+  return(p)
+}
+
+```
+
+```{r plot BAM PAM DAM DIM markers}
+
+# Markers
+BAM <- c("LYVE1","MS4A7","MRC1","FCNA","CD74","IRF7","TTR","CLEC7A","CSF1R","IGF8","ITGB1","MAF","MAFB","NOTCH3","RUNX1","TGFB1","TLN1","CD36","CD163","CD169","CD38")
+microglia <- c("P2RY12","GPR34","SALL1","HEXB","FCRL2","TMEM119","OLFML3","SOCS3","TREM2","CX3CR1","SLC2A5","CRYBB1","SIGLECH","GPR84","FCRLS","P2RY13","ITGB5","ANXA3")
+DIM <- toupper(c("Atf3","Btg2","Ccl4","Ctss","Dusp1","Egr1","Fos","Icam1","Ier2","Ier5","Il1a","Il1b","Itga6","Jun","Junb","Klf6","Tnf","Zfp36","Cd83","Fosb","CD14","FTH1","NFKBIA","NFKBIZ","AXL","CSF2RA","EIF1","PLAUR","SAT1"))
+PAM <- toupper(c("Cst7","Ccl3","Igf1","Spp1","Apoe","Ctsd","Ctsb","Lpl","Tyrobp","Cd9","Fth1","Ctsz","Cd63","Ctsl","Ctsa","Clec7a","Gpnmb","Fabp5","Ftl1","Sepp1","Cyba"))
+embryonic_microglia <- toupper(c("Mtap1b","Gpx3","Ldha","Aldoa","Pkm2","Meg3","Npm1","Ftl1","Eif5a","Mif","Eef1a1","Cfl1","Tmsb4x","Rps19","Rn45s","Actb","Rpl13","Evl","Ikzf1","Rabac1","Man2b1","Cd84"))
+
+# Plots
+pdf("Plots/Co-culture_timecourse/dotpt_markers_BAM.pdf")
+DotPlot(seurat, features = BAM, group.by = "sample") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/dotpt_markers_microglia.pdf")
+DotPlot(seurat, features = microglia, group.by = "sample") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/dotpt_markers_DIM.pdf")
+DotPlot(seurat, features = DIM, group.by = "sample") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/dotpt_markers_PAM.pdf")
+DotPlot(seurat, features = PAM, group.by = "sample") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/dotpt_markers_embryonic_microglia.pdf")
+DotPlot(seurat, features = embryonic_microglia, group.by = "sample") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+```
+
+```{r stacked vln plot marger genes microglia in vitro}
+
+DefaultAssay(seurat) <- "RNA"
+Idents(seurat) <- "celltype"
+
+pdf("Plots/Co-culture_timecourse/vlnpt_top2_markers_ct.pdf", width = 7.5, height = 6)
+StackedVlnPlot(obj = seurat, features = top2_cl_markers$gene, cols = col_ct) 
+dev.off()
+
+png("Plots/Co-culture_timecourse/vlnpt_top2_markers_ct.png",  width = 2700, height = 2100, res = 400)
+StackedVlnPlot(obj = seurat, features = top2_cl_markers$gene, cols = col_ct) 
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/dotpt_top2_markers_ct.pdf", width = 7.5, height = 4)
+DotPlot(seurat, features = top2_cl_markers$gene, group.by = "celltype") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+png("Plots/Co-culture_timecourse/dotpt_top2_markers_ct.png", width = 2900, height = 1500, res = 400)
+DotPlot(seurat, features = top2_cl_markers$gene, group.by = "celltype") + scale_colour_gradientn(colours = green_feature_cols(8)) + RotatedAxis() 
+dev.off()
+
+
+```
+
+# Gene ontology
+
+#### EnrichR
+DE and EnrichR pathway visualization barplot generation.
+```{r DE and EnrichR}
+
+# DEenrichRPlot is a function by Seurat.
+# Default, which was used here, is to peform "wilcox" test between a group of cells and another group of cells.
+# Here I used some cell types against all other cells. Minimum p-values is 0.05 and the log fold change threshold I used is 0.3.
+# Different enrichR databases can be used (list here: https://maayanlab.cloud/Enrichr/#libraries) but I used only the Reactome 2022 for this analysis.
+
+# library(enrichR)
+# 
+# Idents(seurat) <- "RNA_snn_res.0.3"
+# 
+# pdf("Plots/Co-culture_timecourse/reactome_2022_homeostatic_microglia.pdf",  width = 10, height = 5)
+# DEenrichRPlot(object = seurat, ident.1 = 0, ident.2 = c(1,2,3,4,5,6,7,8,9), enrich.database = "Reactome_2022", max.genes = 50, balanced = T, retunrn.gene.list = T, logfc.threshold = 0.3, cols = c("black"))
+# dev.off()
+
+```
+
+#### Cell type markers
+Generate plots with markers of various clusters
+```{r feature plots}
+
+DefaultAssay(seurat) <- "RNA"
+
+genes <- c("PTPRC", "SPP1", "AIF1", "CX3CR1", "RUNX1", "SPI1", "CSF1R", "AXL", "P2RY12", "SALL1", "TREM2")
+markers <- c("C3", "EGR1", # remodelling microglia
+             "CXCL5", "IL7R", # inflammatory microglia
+              "F13A1", "MRC1", # resting microglia or brain-associated microgphages
+              "APOC1", "ACP5", # lipid-associated microglia
+              "MKI67", "TOP2A", # proliferating
+              "TPM2", "ACTA2", # smooth muscle cell
+              "SOX4", "MAP1B" # neuron 
+                )
+
+
+png("Plots/Co-culture_timecourse/feature_plot_microglia_genes.png",  width = 6000, height = 4500, res = 500)
+FeaturePlot(seurat, features = genes, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol = 4) & NoAxes() & NoLegend()
+dev.off()
+
+png("Plots/Co-culture_timecourse/feature_plot_celltype_markers.png",  width = 6000, height = 6000, res = 500)
+FeaturePlot(seurat, features = markers, cols = green_feature_cols(10), order = T, pt.size = 0.8, ncol=4) & NoAxes() & NoLegend()
+dev.off()
+
+```
+
+#### Plot proportions of cells per cluster and protocol.
+```{r plot cell proportions}
+
+DefaultAssay(seurat) <- "RNA"
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$celltype, seurat$sample))
+cells_cl$Var2 <- factor(x = cells_cl$Var2, levels = mg_cocult_levels)
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Celltype"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Sample"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/prop_cells_per_cluster.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Sample, y=Freq, x=Celltype)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Cell type") + 
+    ylab("Proporion of cells") +
+    scale_fill_manual(values= col_sample) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+
+# create a dataset
+cells_cl <- as.data.frame(table(seurat$celltype, seurat$sample))
+cells_cl$Var2 <- factor(x = cells_cl$Var2, levels = c("all"))
+
+colnames(cells_cl)[which(names(cells_cl) == "Var1")] <- "Celltype"
+colnames(cells_cl)[which(names(cells_cl) == "Var2")] <- "Sample"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/prop_all_cells_per_sample.pdf",  width = 6, height = 8)
+ggplot(cells_cl, aes(fill=Celltype, y=Freq, x="")) +
+    geom_bar(position="fill", stat="identity") +
+    ggplot2::theme_classic() +
+    xlab("Cell type") +
+    ylab("Proporion of cells") +
+    scale_fill_manual(values = rev(rainbow_pastel_cols(7))) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16))
+dev.off()
+
+```
+
+# Pseudotemporal ordering
+
+#### Destiny package
+```{r subset cells}
+
+# Subset control microglia
+seurat_ctrl <- subset(seurat, subset = sample %in% c("MG-d3-ctrl", "MG-d15-ctrl", "MG-d30-ctrl", "MG-d58-ctrl")) %>%
+        subset(subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(seurat_ctrl) <- setdiff(VariableFeatures(seurat_ctrl), unlist(cc.genes))
+seurat_ctrl <- CellCycleScoring(seurat_ctrl,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = TRUE)
+seurat_ctrl <- ScaleData(seurat_ctrl, vars.to.regress = c("S.Score", "G2M.Score"))
+seurat_ctrl <- RunPCA(seurat_ctrl) %>% 
+        RunUMAP(dims = 1:20)
+
+
+# Subset cocultured microglia
+seurat_cocul <- subset(seurat, subset = sample %in% c("MG-d3-cocul", "MG-d15-cocul", "MG-d30-cocul", "MG-d58-cocul")) %>%
+        subset(subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(seurat_cocul) <- setdiff(VariableFeatures(seurat_cocul), unlist(cc.genes))
+seurat_cocul <- CellCycleScoring(seurat_cocul,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = TRUE)
+seurat_cocul <- ScaleData(seurat_cocul, vars.to.regress = c("S.Score", "G2M.Score"))
+seurat_cocul <- RunPCA(seurat_cocul) %>% 
+        RunUMAP(dims = 1:20)
+
+
+# Subset all microglia
+seurat_mg <- subset(seurat, subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(seurat_mg) <- setdiff(VariableFeatures(seurat_mg), unlist(cc.genes))
+seurat_mg <- CellCycleScoring(seurat_mg,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = TRUE)
+seurat_mg <- ScaleData(seurat_mg, vars.to.regress = c("S.Score", "G2M.Score"))
+seurat_mg <- RunPCA(seurat_mg) %>%
+        RunUMAP(dims = 1:20)
+
+########################################################################################################################
+# I tried subsetting all microglai and running diffusion map and calculating dpt on this.
+# Unfortunately this seemed to confuse the algorhith amd I would get opposite directions to what is known from the data and between the samples. 
+# If I run it separately on both samples, the problem is not present.
+# Update as of 24/10/2022: maybe the different directions is not a problem. I now rather think that this shows that the two trajectories are differing majorly and running diffusion map on them all togther it is the best way to comapre them.
+########################################################################################################################
+
+# Subset all microglia without day 58
+seurat_mg_no_d58 <- subset(seurat, subset = sample %in% c("MG-d3-ctrl", "MG-d15-ctrl", "MG-d30-ctrl", "MG-d3-cocul", "MG-d15-cocul", "MG-d30-cocul")) %>%
+        subset(subset = celltype %in% c("remodelling microglia", "inflammatory microglia", "resting microglia", "lipid associated microglia", "proliferating microglia")) %>%
+        FindVariableFeatures(nfeatures = 3000)
+VariableFeatures(seurat_mg_no_d58) <- setdiff(VariableFeatures(seurat_mg_no_d58), unlist(cc.genes))
+seurat_mg_no_d58 <- CellCycleScoring(seurat_mg_no_d58,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = TRUE)
+seurat_mg_no_d58 <- ScaleData(seurat_mg_no_d58, vars.to.regress = c("S.Score", "G2M.Score"))
+seurat_mg_no_d58 <- RunPCA(seurat_mg_no_d58) %>%
+        RunUMAP(dims = 1:20)
+
+```
+
+```{r run diffusion map}
+
+# Load the destiny package
+library(destiny)
+
+# Run destiny on control
+dm_ctrl <- DiffusionMap(Embeddings(seurat_ctrl, "pca")[,1:20])
+dpt_ctrl <- DPT(dm_ctrl)
+seurat_ctrl$dpt <- rank(-dpt_ctrl$dpt)
+
+FeaturePlot(seurat_ctrl, "dpt", reduction = "umap_css", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+FeaturePlot(seurat_ctrl, "dpt", reduction = "pca", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+
+# Run destiny on coculture
+dm_cocul <- DiffusionMap(Embeddings(seurat_cocul, "pca")[,1:20])
+dpt_cocul <- DPT(dm_cocul)
+seurat_cocul$dpt <- rank(-dpt_cocul$dpt)
+
+FeaturePlot(seurat_cocul, "dpt", reduction = "umap_css", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+FeaturePlot(seurat_cocul, "dpt", reduction = "pca", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+
+
+# Run destiny on all microglia
+dm_mg <- DiffusionMap(Embeddings(seurat_mg, "pca")[,1:30])
+dpt_mg <- DPT(dm_mg)
+seurat_mg$dpt <- rank(-dpt_mg$dpt)
+
+pdf("Plots/Co-culture_timecourse/dpt_umap.pdf",  width = 4.5, height = 4)
+FeaturePlot(seurat_mg, "dpt", reduction = "umap_css", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+dev.off()
+
+png("Plots/Co-culture_timecourse/dpt_umap.png", width = 2200, height = 1900, res = 400)
+FeaturePlot(seurat_mg, "dpt", reduction = "umap_css", cols = viridis_pal(option = "B")(30), order = T, pt.size = 0.4) & NoAxes()
+dev.off()
+
+# Run destiny on all microglia without day 58
+dm_mg_no_d58 <- DiffusionMap(Embeddings(seurat_mg_no_d58, "pca")[,1:30])
+dpt_mg_no_d58 <- DPT(dm_mg_no_d58)
+seurat_mg_no_d58$dpt <- rank(-dpt_mg_no_d58$dpt)
+FeaturePlot(seurat_mg_no_d58, "dpt", reduction = "umap_css")
+FeaturePlot(seurat_mg, "dpt", reduction = "umap_css")
+
+FeaturePlot(seurat, features = c("P2RY12", "CEBPB", "PROS1", "RGS1"), reduction = "umap_css", order=T)
+FeaturePlot(seurat_MG, features = c("P2RY12", "CEBPB", "PROS1", "RGS1"), reduction = "umap", order=T)
+
+
+```
+
+```{r plot dpt}
+
+library(ggplot2)
+
+# qplot(seurat_mg$dpt, as.numeric(seurat_mg@assays$RNA@data["CXCL5",]), colour = seurat_mg$condition,
+#                xlab="Dpt", ylab="Expression", main="CXCL5") +
+#          geom_smooth(se = FALSE, method = "loess", size = 0.5) + theme_light()
+# 
+# plot1$layers[1] <- NULL
+# plot2$layers[1] <- NULL
+# plot3$layers[1] <- NULL
+# plot1 <- plot1 + xlim(0,15000) + ylim(0,1.6)
+# plot2 <- plot2 + xlim(0,15000) + ylim(0,1.6)
+# plot1 + plot2 + plot3
+
+
+cxcl5 <- as.data.frame(FetchData(seurat_mg, vars = c("CXCL5","dpt", "condition", "sample")))
+c3 <- as.data.frame(FetchData(seurat_mg, vars = c("C3","dpt", "condition", "sample")))
+aif1 <- as.data.frame(FetchData(seurat_mg, vars = c("AIF1","dpt", "condition", "sample")))
+egr1 <- as.data.frame(FetchData(seurat_mg, vars = c("EGR1","dpt", "condition", "sample")))
+stat1 <- as.data.frame(FetchData(seurat_mg, vars = c("STAT1","dpt", "condition", "sample")))
+spi1 <- as.data.frame(FetchData(seurat_mg, vars = c("SPI1","dpt", "condition", "sample")))
+ets1 <- as.data.frame(FetchData(seurat_mg, vars = c("ETS1","dpt", "condition", "sample")))
+egr2 <- as.data.frame(FetchData(seurat_mg, vars = c("EGR2","dpt", "condition", "sample")))
+egr3 <- as.data.frame(FetchData(seurat_mg, vars = c("EGR3","dpt", "condition", "sample")))
+mitf <-  as.data.frame(FetchData(seurat_mg, vars = c("MITF","dpt", "condition", "sample")))
+jun <-  as.data.frame(FetchData(seurat_mg, vars = c("JUN","dpt", "condition", "sample")))
+e2f2 <-  as.data.frame(FetchData(seurat_mg, vars = c("E2F2","dpt", "condition", "sample")))
+
+plot.cxcl5 <- ggplot(cxcl5, aes(dpt, CXCL5, color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.c3 <-ggplot(c3, aes(dpt, C3, color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.e2f2 <-ggplot(e2f2, aes(dpt, E2F2, color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.aif1 <-ggplot(aif1, aes(dpt, AIF1, color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.egr1 <-ggplot(egr1, aes(dpt, EGR1, color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.stat1 <-ggplot(stat1, aes(dpt, STAT1, color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.spi1 <-ggplot(spi1, aes(dpt, SPI1,  color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.ets1 <-ggplot(ets1, aes(dpt, ETS1,  color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.egr2 <-ggplot(egr2, aes(dpt, EGR2,  color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.egr3 <-ggplot(egr3, aes(dpt, EGR3,  color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.mitf <-ggplot(mitf, aes(dpt, MITF,  color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+plot.jun <-ggplot(jun, aes(dpt, JUN,  color = condition)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = c("#C73E04", "#026D7D")) +
+  theme_classic()
+# plot all together
+plot.dpt <- plot.cxcl5 + plot.c3 + plot.aif1 + plot.egr1 + plot.e2f2 + plot.stat1 + plot.spi1 + plot.ets1 + plot.egr2 + plot.egr3 + plot.mitf + plot.jun
+
+# VlnPlot(seurat, features = c("EGR1", "EGR2","EGR3", "SPI1", "STAT1", "ETS1"), split.by = "sample", group.by = "sample")
+
+pdf("Plots/Co-culture_timecourse/test.pdf",  width = 18, height = 22)
+ggplot(egr2, aes(dpt, EGR2,  color = condition)) +
+  geom_point(shape=21, size=1.2, aes(fill=sample, size = 0.1, alpha = 0.5)) +
+  geom_smooth(span = 0.3, method = "loess", size = 0.5) + 
+  scale_color_manual(values = colorful_multi(10)) +
+  theme_classic()
+dev.off()
+
+pdf("Plots/Co-culture_timecourse/dpt_results.pdf",  width = 18, height = 22)
+plot.dpt
+dev.off()
+
+```
+
+# Comparison to primary microglia Kracht et al
+
+```{r load and prepare primary microglia Kracht}
+
+## logCP10k-primary vs. logUMInorm-organoid
+# load("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Kracht_Science_2020_human_fetal_microglia_scRNAseq_ATACseq/niches_avgExpr_meta.RData")
+load("Objects/Kracht_primary_microglia/niches_microglia_only_avgExpr_meta.RData") # excluding monocytes, erythrocytes, perivascular macrophages and SOX-high microglia
+
+# write.csv(vargenes_niches, "vargenes_niches.csv", row.names = FALSE)
+
+## Load primary fetal microglia
+seurat_MG <- readRDS("/links/groups/treutlein/USERS/zhisong_he/Work/public_datasets/Kracht_Science_2020_human_fetal_microglia_scRNAseq_ATACseq/seurat.rds")
+seurat_MG_only <- readRDS("Objects/Kracht_primary_microglia/seurat_microglia_only.rds") # excluding monocytes, erythrocytes, perivascular macrophages and SOX-high microglia
+
+# Load uwot model
+umap_model <- load_uwot(file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/kracht_uwot_model_pca.uwot")
+umap_model_MG_only <- load_uwot(file="/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Kracht_primary_microglia/uwot_model_microglia_only_pca.uwot") # excluding monocytes, erythrocytes, perivascular macrophages and SOX-high microglia
+
+```
+
+```{r name celltypes in kracht microglia}
+
+Idents(seurat_MG) <- "celltype"
+seurat_MG$celltype  <- factor(setNames(c("Erythrocyte",
+           "Monocyte",
+           "Perivascular macrophage",
+           "SOX-hi microglia",
+           "SOX-medium microglia",
+           "Proliferating microglia",
+           "Homeostatic microglia (early)",
+           "Homeostatic microglia (late)",
+            "Activated microglia",
+           "Activated microglia"), levels(seurat_MG@active.ident))[seurat_MG@active.ident])
+
+```
+
+
+#### Seurat-based label transfer
+```{r Seurat-based label transfer}
+
+# Perform Seurat label transfer for projection of the reference onto the query (iPSC-dervied) microglia
+# Find anchors
+anchors <- FindTransferAnchors(reference = seurat_MG, query = seurat, dims = 1:50, npcs = 50, reduction = "rpca", k.filter = NA,verbose = F)
+# Transfer the categorical information across the two datasets as predict.id
+# Seurat does not correct or modify the query expression data
+# Label transfer based on timepoint
+predictions <- TransferData(anchorset = anchors, query = seurat, refdata = as.character(seurat_MG$timepoint_wks), dims = 1:50, weight.reduction = "pca") # project the PCA structure of the reference onto the query by default (this can be changed with the weight.reduction parameter). TransferData returns a matrix with predicted IDs and prediction scores, which we can add to the query metadata.
+seurat$timepoint_wks_transfer <- predictions$predicted.id
+
+# Label transfer based on cell type
+predictions <- TransferData(anchorset = anchors, query = seurat, refdata = as.character(seurat_MG$celltype), dims = 1:50, weight.reduction = "pca")
+seurat$celltype_transfer <- predictions$predicted.id
+
+# Order metadata levels
+levels_primary_wks <- factor(c(9, 10, 11, 12, 13, 15, 16, 17, 18))
+seurat$timepoint_wks_transfer <- factor(seurat$timepoint_wks_transfer, levels = levels_primary_wks)
+
+# Plot the label transfer by timepoint
+pdf("Plots/Co-culture_timecourse/transfer_kracht_by_week.pdf",  width = 6, height = 5)
+DimPlot(seurat, group.by="timepoint_wks_transfer", reduction="umap_css", pt.size = 0.6, cols = vintage_rich_cols(11)) & NoAxes()
+dev.off()
+png("Plots/Co-culture_timecourse/transfer_kracht_by_week.png",  width = 2700, height = 2600, res = 500)
+DimPlot(seurat, group.by="timepoint_wks_transfer", reduction="umap_css", pt.size = 0.6, cols =  vintage_rich_cols(11)) & NoAxes()
+dev.off()
+
+
+# Plot the label transfer by cell type
+pdf("Plots/Co-culture_timecourse/transfer_kracht_by_celltype.pdf",  width = 7.5, height = 5)
+DimPlot(seurat, group.by="celltype_transfer", reduction="umap_css", pt.size = 0.6, cols = col_primary_ct) & NoAxes()
+dev.off()
+png("Plots/Co-culture_timecourse/transfer_kracht_by_celltype.png",  width = 3700, height = 2600, res = 500)
+DimPlot(seurat, group.by="celltype_transfer", reduction="umap_css", pt.size = 0.6, cols =  col_primary_ct) & NoAxes()
+dev.off()
+
+Idents(seurat) <- "celltype_transfer"
+# susbet cells fro mwach sample
+am <- WhichCells(seurat, idents = c("Activated microglia"))
+home <- WhichCells(seurat, idents = c("Homeostatic microglia (early)"))
+homl <- WhichCells(seurat, idents = c("Homeostatic microglia (late)"))
+prom <- WhichCells(seurat, idents = c("Proliferating microglia"))
+sm <- WhichCells(seurat, idents = c("SOX-medium microglia"))
+sh <- WhichCells(seurat, idents = c("SOX-hi microglia"))
+mo <- WhichCells(seurat, idents = c("Monocyte"))
+pmac <- WhichCells(seurat, idents = c("Perivascular macrophage"))
+
+# plot each sample separately
+png("Plots/Co-culture_timecourse/umap_by_celltype_transfer.png", width = 5500, height = 2600, res = 400)
+(DimPlot(seurat, cells.highlight = home,  reduction="umap_css", cols.highlight = c("#9A5C6B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = homl,  reduction="umap_css", cols.highlight = c("#5F718B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = am,  reduction="umap_css", cols.highlight = c("#41867A"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = prom,  reduction="umap_css", cols.highlight = c("#5C9160"), cols = "lightgray", order = T) & NoAxes() & NoLegend()) / 
+(DimPlot(seurat, cells.highlight = sm,  reduction="umap_css", cols.highlight = c("#ACA64D"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = sh,  reduction="umap_css", cols.highlight = c("#E5A83B"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = mo,  reduction="umap_css", cols.highlight = c("#DD862C"), cols = "lightgray", order = T) & NoAxes() & NoLegend() |
+DimPlot(seurat, cells.highlight = pmac,  reduction="umap_css", cols.highlight = c("#DA6835"), cols = "lightgray", order = T) & NoAxes() & NoLegend())
+dev.off()
+
+```
+#### Plot proportions of cells per condition transfered from kracht et al.
+```{r plot cell proportions transfered from primary data}
+
+DefaultAssay(seurat) <- "RNA"
+
+# create a dataset to check which cell type is contained in each sample
+cells_sample <- as.data.frame(table(seurat$sample, seurat$celltype_transfer))
+cells_sample$Var1 <- factor(x = cells_sample$Var1, levels = mg_cocult_levels)
+cells_sample$Var2 <- factor(x = cells_sample$Var2, levels = mg_primary_ct_levels)
+
+colnames(cells_sample)[which(names(cells_sample) == "Var1")] <- "Sample"
+colnames(cells_sample)[which(names(cells_sample) == "Var2")] <- "Celltype"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/prop_transferred_cells_per_sample.pdf",  width = 6, height = 8)
+ggplot(cells_sample, aes(fill=Celltype, y=Freq, x=Sample)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Transferred celltype") +
+    scale_fill_manual(values= col_primary_ct) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+# create a dataset to check what proportion of each cell type is made up of which sample 
+cells_sample <- as.data.frame(table(seurat$sample, seurat$celltype_transfer))
+cells_sample$Var1 <- factor(x = cells_sample$Var1, levels = mg_cocult_levels)
+cells_sample$Var2 <- factor(x = cells_sample$Var2, levels = mg_primary_ct_levels)
+
+colnames(cells_sample)[which(names(cells_sample) == "Var1")] <- "Sample"
+colnames(cells_sample)[which(names(cells_sample) == "Var2")] <- "Celltype"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/prop_sample_for_each_celltype.pdf",  width = 6, height = 8)
+ggplot(cells_sample, aes(fill=Sample, y=Freq, x=Celltype)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Celltype") + 
+    ylab("Sample") +
+    scale_fill_manual(values= col_sample) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+# create a dataset
+cells_sample <- as.data.frame(table(seurat$sample, seurat$timepoint_wks_transfer))
+cells_sample$Var1 <- factor(x = cells_sample$Var1, levels = mg_cocult_levels)
+cells_sample$Var2 <- factor(x = cells_sample$Var2, levels = levels_primary_wks)
+
+colnames(cells_sample)[which(names(cells_sample) == "Var1")] <- "Sample"
+colnames(cells_sample)[which(names(cells_sample) == "Var2")] <- "Timepoint"
+
+# Stacked
+pdf("Plots/Co-culture_timecourse/prop_transferred_timepoint_per_sample.pdf",  width = 6, height = 8)
+ggplot(cells_sample, aes(fill=Timepoint, y=Freq, x=Sample)) + 
+    geom_bar(position="fill", stat="identity") + 
+    ggplot2::theme_classic() + 
+    xlab("Sample") + 
+    ylab("Transferred celltype") +
+    scale_fill_manual(values= vintage_rich_cols(11)) +
+   theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(size = 13, angle = 45, hjust = 1), axis.title.y = element_text(size = 16), axis.text.y = element_text(size = 16)) 
+dev.off()
+
+```
+
+
+```{r save stem cell derived microglai object}
+
+saveRDS(seurat, "/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Co-culture_timecourse/microglia_d3_d15_d30_d58_integrated.rds")
+
+```
+
+```{r similarity spectrum to reference}
+
+seurat <- readRDS("Objects/Co-culture_timecourse/microglia_d3_d15_d30_d58_integrated.rds")
+
+# Calculate Reference Similarity Spectrum (RSS), given expression of the data and expression of the meta niches of the primary fetal microglia
+sim2_MG_niches <- ref_sim_spectrum(seurat@assays$RNA@data, avg_expr_niches[vargenes_niches,], scale=F)
+dimnames(sim2_MG_niches) <- list(colnames(seurat), colnames(avg_expr_niches))
+cols_MG_ct <- setNames(c("#A569BD","#E59866","#E74C3C","#F4D03F","#82E0AA","#5DADE2","#52BE80","#27AE60","#48C9B0","#17A589"), levels(meta_niches$celltype))
+
+# plot similarity to the primary microglia similarity spectrum score
+png("Plots/Co-culture_timecourse/css_similarity_to_primary_umap.png", width = 2200, height = 1900, res = 400)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(seurat,"umap_css"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+pdf("Plots/Co-culture_timecourse/css_similarity_to_primary_umap.pdf", width = 4.5, height = 4)
+par(mar=c(1,1,1,1)); plotFeature(Embeddings(seurat,"umap_css"), apply(sim2_MG_niches,1,max), colorPal=bluered_colscheme, cex=0.4, pt_border=F, do_legend = T, legend_cex = 0.2, legend_pos = "bottomleft")
+dev.off
+# max sim 0.7971078
+# min sim  -0.0248003
+
+library("vioplot")
+# plot the similarity to primary microglia as a score as a boxplot
+idx_MG <- which(!seurat@active.ident %in% as.character(6:9))
+pdf("Plots/Co-culture_timecourse/css_similarity_to_primary_boxplot.pdf", width = 7, height = 4)
+par(mar=c(10,5,1,1)); boxplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], seurat$sample[idx_MG], list), las=2, frame=F, pch=21, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = col_sample, outcex = 0.2)
+dev.off()
+pdf("Plots/Co-culture_timecourse/css_similarity_to_primary_vlnplot.pdf", width = 7, height = 4)
+par(mar=c(10,5,1,1)); vioplot(tapply(apply(sim2_MG_niches,1,max)[idx_MG], seurat$sample[idx_MG], list), las=2, frame=F, pch=19, cex.axis=0.8, ylab="max(R)", cex.lab=1.3, col = col_sample)
+dev.off()
+
+avg_expr_highres <- sapply(levels(seurat$RNA_snn_res.10), function(cl) rowMeans(seurat@assays$RNA@data[,which(seurat$RNA_snn_res.10==cl)]))
+sim2_highres <- ref_sim_spectrum(seurat@assays$RNA@data, avg_expr_highres[intersect(vargenes_niches,rownames(avg_expr_highres)),], scale=F)
+summary(apply(sim2_highres,1,max)[idx_MG])
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.1803  0.6893  0.7601  0.7395  0.8066  0.9213 
+
+```
+
+#### Add am odule score for activation or homeostasis to in vitro microglia based on kracht culture
+```{r module score}
+
+top50_ct_markers_kracht <- read.csv("/home/marinani/PhD_Projects/Microglia/Microglia_article/Plots/Kracht_primary_microglia/top50_ct_markers_kracht_renamed_ct.csv")
+activated <- top50_ct_markers_kracht %>% group_by(cluster) %>%  filter(cluster == "Activated microglia")
+homeostatic_late <- top50_ct_markers_kracht %>% group_by(cluster) %>%  filter(cluster == "Homeostatic microglia (late)") %>% filter(gene != c("RNA5SP151"))
+
+seurat <- AddModuleScore(object = seurat, features = activated$gene, ctrl = 50, name = 'activated') 
+seurat <- AddModuleScore(object = seurat, features = homeostatic_late$gene, ctrl = 50, name = 'homeostatic_late')
+
+pdf("Plots/Co-culture_timecourse/dotpt_homeostatic_activated_score.pdf", width = 6, height =4)
+DotPlot(object = seurat, features = c('homeostatic_late1','activated1'), group.by = "sample") + scale_colour_gradientn(colours = bluered_colscheme(8))
+dev.off()
+png("Plots/Co-culture_timecourse/dotpt_homeostatic_activated_score.png", width = 2000, height = 1500, res = 400)
+DotPlot(object = seurat, features = c('homeostatic_late1','activated1'), group.by = "sample") + scale_colour_gradientn(colours = bluered_colscheme(8))
+dev.off()
+
+png("Plots/Co-culture_timecourse/featureplot_homeostatic_activated_score.png", width = 2800, height = 1300, res = 400)
+(FeaturePlot(object = seurat, features = 'homeostatic_late1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) | FeaturePlot(object = seurat, features = 'activated1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) ) & NoAxes()
+dev.off()
+pdf("Plots/Co-culture_timecourse/featureplot_homeostatic_activated_score.pdf", width = 12, height = 6)
+(FeaturePlot(object = seurat, features = 'homeostatic_late1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) | FeaturePlot(object = seurat, features = 'activated1', reduction = "umap_css", pt.size = 0.6, cols = bluered_colscheme(30), order = T) ) & NoAxes()
+dev.off()
+
+```
+
+# Info about the RStudio session
+```{r session info}
+
+sessionInfo()
+
+```
+

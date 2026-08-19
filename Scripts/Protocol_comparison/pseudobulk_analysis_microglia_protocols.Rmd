@@ -1,0 +1,320 @@
+---
+title: "Pseudobulk microglia protocols"
+author: "Marina Nikolova"
+date: "25/11/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+```
+
+```{r load Seurat object}
+
+integrated <- readRDS("/home/marinani/PhD_Projects/Microglia/Microglia_article/Objects/Protocol_comparison/integrated_obj.rds")
+
+```
+
+Subset the microglia-like cells only
+```{r}
+
+integrated_mg_only <- subset(integrated, subset = celltype %in% c("smooth muscle cell", "neutrophil", "mast cell"), invert = T)
+
+```
+
+
+Generate a SingleCellExperiment object from the integrated seurat objects
+```{r genearte a SingleCellExperiment object}
+
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts <- integrated_mg_only@assays$RNA@counts 
+
+metadata <- integrated_mg_only@meta.data
+
+# Set up metadata as desired for aggregation and DE analysis
+metadata$protocol <- factor(integrated_mg_only$protocol)
+
+# Create single cell experiment object
+sce <- SingleCellExperiment(assays = list(counts = counts), 
+                           colData = metadata)
+
+```
+
+Take a look at the count matrix
+```{r count matrix and metadata}
+
+# Explore the raw counts for the dataset
+
+## Check the assays present
+assays(sce)
+
+## Check the counts matrix
+dim(counts(sce))
+counts(sce)[1:6, 1:6]
+
+# Explore the cellular metadata for the dataset
+
+dim(colData(sce))
+head(colData(sce))
+
+```
+
+```{r extract necessary metrics}
+
+# Subset metadata to include only the variables you want to aggregate across (here, we want to aggregate by sample and by cluster)
+groups <- colData(sce)[, c("protocol", "celltype")]
+head(groups)
+
+```
+
+#### Aggregate matrix
+Aggregate the counts to generate a matrix with count sums
+```{r generate an aggregated matrix of counts per sample}
+
+# Aggregate across cluster-sample groups
+# transposing row/columns to have cell_ids as row names matching those of groups
+aggr_counts <- aggregate.Matrix(t(counts(sce)), 
+                                groupings = groups, fun = "sum") 
+
+# Explore output matrix
+class(aggr_counts)
+dim(aggr_counts)
+aggr_counts[1:3, 1:10]
+
+# Now transpose the matrix back so we can easilty use it to do DE analysis
+# Transpose aggregated matrix to have genes as rows and samples as columns
+aggr_counts <- t(aggr_counts)
+aggr_counts[1:10, 1:3]
+
+```
+
+Generate matching metadata at the sample-level
+```{r}
+
+# Explore structure of metadata
+head(colData(sce))
+
+# Extract sample-level variables
+metadata <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(protocol, celltype)
+
+dim(metadata)
+head(metadata)
+
+# Exclude duplicated rows
+metadata <- metadata[!duplicated(metadata), ]
+
+dim(metadata)
+head(metadata)
+
+# Rename rows
+rownames(metadata) <- paste0(metadata$protocol,"_", metadata$celltype)
+head(metadata)
+
+# Check the number of cells per sample and cluster
+t <- table(colData(sce)$protocol)
+t
+type(t)
+
+aggr_counts[1:10, 1:2]
+head(metadata)
+
+# Check matching of matrix columns and metadata rows
+all(colnames(aggr_counts) == rownames(metadata)) 
+# They do not, so we make them match
+metadata <- metadata[match(colnames(aggr_counts), rownames(metadata)), ]
+
+```
+#### Differential expression with DESeq2
+
+```{r DESeq2 design formula}
+
+# Create DESeq2 object        
+dds <- DESeqDataSetFromMatrix(aggr_counts, 
+                              colData = metadata, 
+                              design = ~ celltype + protocol)
+
+```
+
+```{r run DESeq2}
+
+# Run DESeq2 differential expression analysis
+dds <- DESeq(dds, useT=TRUE, minmu=1e-6, minReplicatesForReplace =Inf,  test = "LRT", reduced = ~ celltype )
+
+# Plot dispersion estimates
+plotDispEsts(dds)
+
+# Check number of rows
+nrow(dds)
+# Our count matrix contains many rows with only zeros and many roes with only a few fragments total
+# To reduce the size of the object and increase the psed of the functions, we remove the rows that have no or nearly no information
+# We keep only rows with more than 1 count (i.e. more than one transcript detected)
+dds <- dds[rowSums(counts(dds)) > 1,]
+# Check number of rows
+nrow(dds)
+
+```
+
+
+```{r run vst normaliztion}
+
+library(apeglm)
+# Check the coefficients for the comparison
+resultsNames(dds)
+
+# Perform transformation in order to stabilize the variance across the mean and reduce the effect the genes with low counts will have on the final result 
+# (the genes with high counts are accounted for by taking the logarithm of the normalzied count values + a small pseudocount)
+vsd <- vst(dds)
+plotPCA(vsd, "protocol")
+
+```
+
+```{r plot}
+
+pdf("Plots/Protocol_comparison/PCA_pseudobulk_per_protocol.pdf", height = 4, width = 6)
+plotPCA(vsd, intgroup = "protocol") + geom_label(aes(label = name), label.size = 0.1) + geom_point()
+dev.off()
+
+```
+
+```{r}
+
+# Extract the vst matrix from the object and compute pairwise correlation values
+vsd_mat <- assay(vsd)
+vsd_cor <- cor(vsd_mat)
+
+# Plot heatmap
+pdf("Plots/Protocol_comparison/heatmap_protocol_comparison_similarity.pdf", height = 6, width = 7)
+pheatmap(vsd_cor, annotation = metadata[, c("protocol"), drop=F], color=bluered_colscheme(100))
+dev.off()
+
+sampleDists <- dist( t( assay(vsd) ) )
+sampleDists
+
+sampleDistMatrix <- as.matrix( sampleDists ) 
+rownames(sampleDistMatrix) <- paste(vsd$protocol) 
+colnames(sampleDistMatrix) <- paste(vsd$protocol) 
+# colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255) 
+
+pdf("Plots/Protocol_comparison/heatmap_protocol_comparison_Eucledian_distance.pdf", height = 3.5, width = 6)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=hcl.colors(50, "BluYl"))
+dev.off()
+
+```
+
+#### Results table
+```{r build a results table}
+
+resultsNames(dds)
+
+res <- results(dds)
+mcols(res, use.names=TRUE)
+summary(res)
+
+```
+
+```{r DE Comaprison of interaction terms}
+
+betas <- coef(dds)
+colnames(betas)
+
+topGenes <- head(order(res$padj),30)
+mat <- betas[topGenes, -c(1,2)]
+thr <- 3
+mat[mat < -thr] <- -thr
+mat[mat > thr] <- thr
+
+pdf("Plots/Protocol_comparison/DESeq2_heatmap_DE_comparison.pdf",  width = 4, height = 8)
+pheatmap(mat, breaks=seq(from=-thr, to=thr, length=101),
+	  cluster_col=FALSE, color =bluered_colscheme(100)) 
+dev.off()
+
+```
+```{r}
+
+res_B_M <- results(dds, name = "protocol_McQuade_vs_Brownjohn", test = "Wald")
+res_B_M[which.min(res$padj),]
+
+# Turn the DESeq2 results object into a tibble for use with tidyverse functions
+res_B_M_tbl <- res_B_M %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  arrange(padj)
+
+# Check results output
+res_B_M_tbl 
+
+# Set thresholds
+padj_cutoff <- 0.5
+
+# Subset the significant results
+sig_res <- dplyr::filter(res_B_M_tbl, padj < padj_cutoff) %>%
+  dplyr::arrange(padj) %>%
+  mutate(DE = abs(log2FoldChange)>log(1.1) & padj < 0.01) %>%
+  mutate(DEG = ifelse(abs(log2FoldChange)>log(1.1) & padj < 0.01, gene, NA))
+
+# Check significant genes output
+sig_res
+
+# Add to the table another column wtih outcome
+sig_res <- sig_res %>% 
+  mutate(
+    outcome = case_when(log2FoldChange > log(1.1) & padj < 0.01 ~ "Up-regulated",
+                           log2FoldChange < -log(1.1) & padj < 0.01 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(sig_res) 
+
+sig_res$padj[sig_res$padj == 0.000000e+00] <- min(sig_res$padj[which(sig_res$padj != 0)])
+
+# Remove genes coding for mitochondria and ribosome proteins
+blacklist <- c(grep("^MT-", sig_res$gene, value=T), read.table("/home/marinani/Scripts/Databases/Gene_lists/RPgenes_bak.txt")[,1])
+diff_genes <- setdiff(sig_res$gene,blacklist)
+sig_res <- sig_res %>% filter(gene %in% diff_genes)
+nrow(sig_res)
+
+plot <- ggplot(sig_res, aes(x = log2FoldChange, y = -log10(padj),label=DEG)) +
+  geom_point(shape=21, size=2, aes(fill=outcome), position = "jitter") +
+  geom_vline(xintercept=c(-log(1.1), log(1.1), 0),  linetype="dotted") +
+  geom_hline(yintercept=-log10(0.01), linetype="dotted") +
+  theme_classic() + 
+  scale_fill_manual(values = c("#EE9B00", "gray50", "#5F6C25")) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"p_adj")) +
+  ggtitle("DEGs between Brownjohn and McQuade")
+
+
+pdf("Plots/Protocol_comparison/DESeq2_volcano_DE.pdf", height = 7, width = 10)
+plot +
+  geom_label_repel(data = sig_res, mapping = aes(log2FoldChange, -log10(padj), label = DEG), size = 3, max.overlaps = 20)
+dev.off()
+
+write.csv(sig_res, "Plots/Protocol_comparison/DESeq2_McQuade_vs_Brownjohn.csv")
+
+```
+

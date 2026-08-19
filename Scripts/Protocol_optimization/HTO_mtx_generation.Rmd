@@ -1,0 +1,82 @@
+---
+title: "CITE-seq-Count outs to hasthag oligo classification"
+author: "Marina Nikolova"
+date: "03/11/2022"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE, echo = FALSE}
+
+# set working directory for the whole Rmarkdown (with setwed () it would be just for the current chunk)
+knitr::opts_knit$set(root.dir = "/home/marinani/PhD_Projects/Microglia/Microglia_article/")
+
+```
+
+Load packages.
+```{r load packages, echo = FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(colorspace)
+library(SCpubr)
+library(SeuratWrappers)
+library(presto)
+library(ggrepel)
+library(simspec)
+
+
+source("/home/marinani/Scripts/Data_analysis/feature_plots.r")
+
+```
+
+```{r load objects}
+
+# load the objects
+hto1 <- Read10X("/links/groups/treutlein/DATA/sequencing/20220825_P2092_MARINA_Mg_opt_and_BVO_HTO_repeat/processed/HTO_Mg_rep1/umi_count/", gene.column = 1) %>%  # input = sparse matrix (rows = tags, columns = cells)
+        as.matrix %>%                                                                                                                                             # conversion of the S4 object sparse matrix into a normal R matrix
+        t %>%                                                                                                                                                     # transpose the matrix
+        `colnames<-`(., str_extract(colnames(.), "HTO[0-9]+|unmapped"))                                                                                           # this last line is a tidyverse based way to change the names of the columns. The syntax sets as "colnames" any component of a column name that has the word "HTO" + a number or "unmapped". 
+
+hto2 <- Read10X("/links/groups/treutlein/DATA/sequencing/20220825_P2092_MARINA_Mg_opt_and_BVO_HTO_repeat/processed/HTO_Mg_rep2/umi_count/", gene.column = 1) %>%  
+        as.matrix %>%                                                                                                                                            
+        t %>%                                                                                                                                                    
+        `colnames<-`(., str_extract(colnames(.), "HTO[0-9]+|unmapped"))     
+
+# Delete the column 14, which corresponds to unmapped reads and confounds downstream processing
+hto1 <- hto1[,c(-11, -13, -14)]
+hto2 <- hto2[,c(-11, -13, -14)]
+
+# Have a look at the objects
+head(hto1, n=50)
+head(hto2, n=50)
+
+```
+
+```{r wrangle and transpose the matrices}
+
+# Save the hashtag count matrix (hashtags in rownames) to use with HTODemux
+hto1 <- t(hto1)
+hto2 <- t(hto2)
+
+# Have a look at the matrices
+rownames(hto1)
+rownames(hto2)
+
+```
+
+```{r save the matrices}
+
+setwd( "Objects/Protocol_optimization/")
+
+# Save the hashtag matrix to bind it to the Seurat object as HTO assay
+saveRDS(hto1, "hto1_mtx.rds")
+saveRDS(hto2, "hto2_mtx.rds")
+
+```
+
