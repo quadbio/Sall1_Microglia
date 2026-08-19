@@ -7,6 +7,8 @@
 # Include Scripts directory and all its contents
 !Scripts/
 !Scripts/**
+!Tools/
+!Tools/**
 
 # macOS metadata
 .DS_Store
