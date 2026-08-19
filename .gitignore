@@ -7,3 +7,7 @@
 # Include Scripts directory and all its contents
 !Scripts/
 !Scripts/**
+
+# macOS metadata
+.DS_Store
+._*
